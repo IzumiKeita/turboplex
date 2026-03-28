@@ -24,7 +24,15 @@
 ## Installation
 
 ```bash
-# Clone the repository
+# Install from PyPI
+pip install turboplex
+
+# Verify the installation
+tpx --help
+```
+
+```bash
+# Clone the repository (dev)
 cd turboplex
 
 # Install in development mode
@@ -55,6 +63,36 @@ tpx
 # Run and watch changes in real time
 tpx --watch --path tests/
 ```
+
+### Pytest Compatibility Mode (`--compat`)
+
+Use this when your suite relies on complex pytest fixtures (`conftest.py`, `client`, `db`, etc.).
+
+```bash
+tpx --compat --path tests/
+```
+
+### MCP Server (IDE Integration)
+
+```bash
+tpx mcp
+```
+
+Notes:
+- For robustness, TurboPlex isolates tool payloads in JSON files (`--out-json`) to prevent stdout pollution.
+- Subprocesses enforce UTF-8 (`PYTHONUTF8=1`, `PYTHONIOENCODING=utf-8`, `PYTHONUNBUFFERED=1`) to avoid Windows encoding issues.
+- Timeouts are structured and configurable via environment variables:
+  - `TPX_MCP_TURBOPLEX_COLLECT_TIMEOUT_S` (default 120)
+  - `TPX_MCP_TURBOPLEX_RUN_TIMEOUT_S` (default 60)
+  - `TPX_MCP_PYTEST_COLLECT_TIMEOUT_S` (default 120)
+  - `TPX_MCP_PYTEST_RUN_TIMEOUT_S` (default 60)
+
+Tools exposed over MCP:
+- `ping`
+- `turboplex_version`
+- `discover(paths=None, compat=False)`
+- `run(selection, compat=False, max_workers=None)`
+- `get_report(path=None)`
 
 ### Integration with AI Agents
 
@@ -111,7 +149,7 @@ project_path = "."
 
 ### Cache
 
-The cache is stored in `.turboplex_cache/` and is automatically invalidated when test files change (SHA-256 hash).
+The cache is stored in `.turboplex_cache/` and is automatically invalidated when test files change (SHA-256 hash) or when the runtime fingerprint changes (Python version, dependency lock hash, PYTHONPATH, execution flags).
 
 ## API for AI Agents
 
@@ -147,6 +185,8 @@ The cache is stored in `.turboplex_cache/` and is automatically invalidated when
 | `tpx` | Auto-discover and run tests |
 | `tpx --path ./tests` | Run tests in a directory |
 | `tpx --watch` | Watch mode with auto-reload |
+| `tpx --compat` | Delegate discovery/execution to pytest for fixture-heavy suites |
+| `tpx mcp` | Start the MCP server over stdio for IDE integration |
 | `tpx --help` | Show help |
 
 ## Architecture
@@ -190,8 +230,9 @@ This project ignores generated files and local configuration to keep the reposit
 MIT License - See `LICENSE`
 
 ## Authors
+Keita_Izumi
 
-**TurboPlex Team** - [@turbo plexus](https://github.com/turboplex)
+**TurboPlex Team** - [@turbo plexus](https://github.com/IzumiKeita/turboplex)
 
 ---
 

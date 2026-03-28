@@ -1,6 +1,6 @@
 [package]
 name = "turboplex"
-version = "0.2.0"
+version = "0.2.4"
 edition = "2021"
 
 [dependencies]
@@ -26,5 +26,5 @@ name = "turboplex"
 path = "src/lib.rs"
 
 [[bin]]
-name = "turboplex"
+name = "tpx"
 path = "src/main.rs"

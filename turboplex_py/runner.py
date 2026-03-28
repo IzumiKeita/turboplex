@@ -136,11 +136,10 @@ class _Skipped(Exception):
         self.reason = reason
 
 
-def run_main(path_str: str, qual: str) -> None:
+def run_test(path_str: str, qual: str) -> dict[str, Any]:
     path = pathlib.Path(path_str)
     if not path.is_file():
-        _emit(False, 0, f"not a file: {path_str}")
-        sys.exit(1)
+        return {"passed": False, "duration_ms": 0, "error": f"not a file: {path_str}"}
 
     # Check for parametrize index in qualname (e.g., "test_func[0]")
     parametrize_index = None
@@ -158,8 +157,7 @@ def run_main(path_str: str, qual: str) -> None:
     except Exception:
         dt = int((time.perf_counter() - t0) * 1000)
         traceback.print_exc(file=sys.stderr)
-        _emit(False, dt, "import failed")
-        sys.exit(1)
+        return {"passed": False, "duration_ms": dt, "error": "import failed"}
 
     try:
         if "::" in qual:
@@ -176,14 +174,27 @@ def run_main(path_str: str, qual: str) -> None:
             _invoke_function(mod, fn, parametrize_index=parametrize_index)
     except _Skipped as sk:
         dt = int((time.perf_counter() - t0) * 1000)
-        _emit(True, dt, None, skipped=True, skip_reason=sk.reason or None)
-        sys.exit(0)
+        payload: dict[str, Any] = {"passed": True, "duration_ms": dt, "error": None, "skipped": True}
+        if sk.reason:
+            payload["skip_reason"] = sk.reason
+        return payload
     except Exception as e:
         dt = int((time.perf_counter() - t0) * 1000)
         traceback.print_exc(file=sys.stderr)
-        _emit(False, dt, str(e))
-        sys.exit(1)
+        return {"passed": False, "duration_ms": dt, "error": str(e)}
 
     dt = int((time.perf_counter() - t0) * 1000)
-    _emit(True, dt, None)
-    sys.exit(0)
+    return {"passed": True, "duration_ms": dt, "error": None}
+
+
+def run_main(path_str: str, qual: str, out_json: str | None = None) -> None:
+    payload = run_test(path_str, qual)
+    passed = bool(payload.get("passed"))
+    if out_json:
+        pathlib.Path(out_json).write_text(
+            json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+        )
+        sys.exit(0 if passed else 1)
+    json.dump(payload, sys.stdout)
+    sys.stdout.write("\n")
+    sys.exit(0 if passed else 1)

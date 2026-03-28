@@ -1,0 +1,31 @@
+## Cambios recientes
+
+### Packaging / PyPI
+- Se cambió el build-backend de pyproject.toml a maturin (PEP 517) y se configuró el proyecto para publicar como binario (bindings = "bin") para la versión 0.2.0.
+- Se removieron los scripts PEP 621 de pyproject.toml para compatibilidad con maturin en modo bin.
+- Se renombró el binario de Cargo a `tpx` para que el comando instalado sea `tpx`.
+- Se incrementó la versión a 0.2.1 en pyproject.toml y Cargo.toml y se añadió la referencia al README.md para que PyPI muestre la descripción.
+- Se incrementó la versión a 0.2.2 y se configuró Maturin para incluir explícitamente `turboplex_py/**/*` en el paquete.
+- Se añadió un servidor MCP en Python (stdio) y un subcomando `tpx mcp` para lanzarlo desde el binario Rust.
+- Se implementó un modo `--compat` que delega discovery/ejecución a pytest cuando se requiere compatibilidad con fixtures complejas, manteniendo el control de root/PYTHONPATH desde Rust.
+- Se reforzó el fingerprint del cache con versión de Python, hash de dependencias, PYTHONPATH y flags de ejecución.
+- Se expusieron tools MCP para `discover`, `run` y `get_report` para control desde el IDE.
+- Se preparó release 0.2.3: bump de versiones (Rust/Python) y se añadió `mcp` como dependencia de producción para `tpx mcp`.
+- Se preparó release 0.2.4: bump de versiones (Rust/Python) y actualización de README con `--out-json`, timeouts estructurados y refuerzo de UTF-8.
+- Se actualizó README.md con `--compat`, `tpx mcp`, tools MCP y detalles del fingerprint del cache.
+
+### MCP stdio (blindaje)
+- Se instaló un guard global para stdout en modo MCP: stdout queda reservado para JSON-RPC; cualquier texto no-JSON-RPC se redirige a stderr (o fail-fast vía `TPX_MCP_STDOUT_MODE=failfast`).
+- Se envolvió la ejecución de tools (`discover`, `run`, `get_report`) para capturar stdout/stderr y retornarlos en el envelope `logs`.
+- Se estandarizó el envelope de respuesta para tools MCP con `schemaVersion=tpx.mcp.tool.v1`, `runId` UUIDv7, `summary` y `logs`.
+- Se configuró UTF-8 para el proceso MCP en Windows (`PYTHONIOENCODING=utf-8`, `PYTHONUTF8=1`).
+- Se agregó aislamiento por archivo JSON (`--out-json`) para collector/runner en Python y para su invocación desde MCP, evitando contaminación de stdout.
+- Se agregaron timeouts estructurados en subprocesses (pytest y turboplex) con errores tipo `{kind: timeout|subprocess_failed, phase, ...}` y variables `TPX_MCP_*_TIMEOUT_S` para configurar.
+
+### Refactorización (límite 600 líneas)
+- Se convirtió `src/main.rs` en un wrapper mínimo y se movió la lógica del binario a `src/main/mod.rs` + `src/main/part1.rs` (runtime Python, hashing, discovery) + `src/main/part2.rs` (collect/ejecución/reporte).
+- Se migró `src/test_runner.rs` a `src/test_runner/` como árbol de módulos (`config`, `cache`, `process`, `shell`, `python`, `yaml`, `jobs`, `discovery`, `result`) manteniendo la API pública vía `src/test_runner/mod.rs`.
+- Se ajustaron imports de `colored` por módulo para que `cargo clippy` compile sin errores (Colorize solo donde se usa).
+- Se ajustó el loop de watch mode para cumplir `clippy::single_match` (uso de `if let`).
+- Se simplificó `recv_timeout` a `is_ok()` para evitar `clippy::redundant_pattern_matching` bajo `-D warnings`.
+- Se forzó UTF-8 en subprocesses de Python en Windows (`PYTHONUTF8=1`, `PYTHONIOENCODING=utf-8`, `PYTHONUNBUFFERED=1`) y se migró la comunicación Rust↔Python a archivos JSON temporales para evitar ruido en stdout.

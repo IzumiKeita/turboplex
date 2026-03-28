@@ -5,6 +5,44 @@ import os
 import sys
 import subprocess
 
+def _parse_collect_args(argv: list[str]) -> tuple[list[str], str | None]:
+    out_json = None
+    paths: list[str] = []
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--out-json" and i + 1 < len(argv):
+            out_json = argv[i + 1]
+            i += 2
+            continue
+        paths.append(argv[i])
+        i += 1
+    if not paths:
+        paths = ["."]
+    return paths, out_json
+
+
+def _parse_run_args(argv: list[str]) -> tuple[str | None, str | None, str | None]:
+    path = None
+    qual = None
+    out_json = None
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--path" and i + 1 < len(argv):
+            path = argv[i + 1]
+            i += 2
+            continue
+        if argv[i] == "--qual" and i + 1 < len(argv):
+            qual = argv[i + 1]
+            i += 2
+            continue
+        if argv[i] == "--out-json" and i + 1 < len(argv):
+            out_json = argv[i + 1]
+            i += 2
+            continue
+        i += 1
+    return path, qual, out_json
+
+
 def main():
     # Check if this is a subprocess call from Rust binary (via environment variable)
     if os.environ.get("TURBOTEST_SUBPROCESS") == "1":
@@ -13,23 +51,12 @@ def main():
         from turboplex_py.runner import run_main
         
         if len(sys.argv) > 1 and sys.argv[1] == "collect":
-            paths = sys.argv[2:] if len(sys.argv) > 2 else ["."]
-            collect_main(paths)
+            paths, out_json = _parse_collect_args(sys.argv[2:])
+            collect_main(paths, out_json=out_json)
         elif len(sys.argv) > 1 and sys.argv[1] == "run":
-            path = None
-            qual = None
-            i = 2
-            while i < len(sys.argv):
-                if sys.argv[i] == "--path" and i + 1 < len(sys.argv):
-                    path = sys.argv[i + 1]
-                    i += 2
-                elif sys.argv[i] == "--qual" and i + 1 < len(sys.argv):
-                    qual = sys.argv[i + 1]
-                    i += 2
-                else:
-                    i += 1
+            path, qual, out_json = _parse_run_args(sys.argv[2:])
             if path and qual:
-                run_main(path, qual)
+                run_main(path, qual, out_json=out_json)
             else:
                 print("Error: --path and --qual required for run", file=sys.stderr)
                 sys.exit(1)
@@ -46,24 +73,14 @@ def main():
         
         if sys.argv[1] == "collect":
             # collect takes paths as remaining args
-            collect_main(sys.argv[2:] if len(sys.argv) > 2 else ["."])
+            paths, out_json = _parse_collect_args(sys.argv[2:])
+            collect_main(paths, out_json=out_json)
         elif sys.argv[1] == "run":
             # run takes --path and --qual
             args = sys.argv[2:]
-            path = None
-            qual = None
-            i = 0
-            while i < len(args):
-                if args[i] == "--path" and i + 1 < len(args):
-                    path = args[i + 1]
-                    i += 2
-                elif args[i] == "--qual" and i + 1 < len(args):
-                    qual = args[i + 1]
-                    i += 2
-                else:
-                    i += 1
+            path, qual, out_json = _parse_run_args(args)
             if path and qual:
-                run_main(path, qual)
+                run_main(path, qual, out_json=out_json)
             else:
                 print("Error: --path and --qual required for run", file=sys.stderr)
                 sys.exit(1)

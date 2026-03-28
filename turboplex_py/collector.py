@@ -152,11 +152,12 @@ def _iter_test_files(paths: list[str]) -> list[pathlib.Path]:
     out: list[pathlib.Path] = []
     for raw in paths:
         p = pathlib.Path(raw)
-        if p.is_file() and p.name.startswith("test_") and p.suffix == ".py":
+        if p.is_file() and (p.name.startswith("test_") or p.name.endswith("_test.py")) and p.suffix == ".py":
             out.append(p.resolve())
             continue
         if p.is_dir():
             out.extend(sorted(p.resolve().rglob("test_*.py")))
+            out.extend(sorted(p.resolve().rglob("*_test.py")))
     seen: set[pathlib.Path] = set()
     uniq: list[pathlib.Path] = []
     for f in out:
@@ -175,7 +176,7 @@ def _load_module(path: pathlib.Path):
     return mod
 
 
-def collect_main(paths: list[str]) -> None:
+def collect(paths: list[str]) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for path in _iter_test_files(paths):
         try:
@@ -207,5 +208,14 @@ def collect_main(paths: list[str]) -> None:
                         "kind": "method",
                     }
                 )
-    json.dump({"items": items}, sys.stdout, cls=DecimalEncoder)
+    return items
+
+
+def collect_main(paths: list[str], out_json: str | None = None) -> None:
+    payload = {"items": collect(paths)}
+    if out_json:
+        p = pathlib.Path(out_json)
+        p.write_text(json.dumps(payload, cls=DecimalEncoder, ensure_ascii=False), encoding="utf-8")
+        return
+    json.dump(payload, sys.stdout, cls=DecimalEncoder)
     sys.stdout.write("\n")
