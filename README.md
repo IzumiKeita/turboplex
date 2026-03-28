@@ -1,4 +1,6 @@
-# TurboPlex (tpx) - El Motor de Orquestación de Pruebas para la Era de la IA
+# TurboPlex (tpx) — The Test Orchestration Engine for the AI Era
+
+**English** | [Español](README.es.md)
 
 <p align="center">
   <img src="https://img.shields.io/badge/Rust-DEA584?style=for-the-badge&logo=rust&logoColor=white" alt="Rust">
@@ -6,72 +8,72 @@
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License">
 </p>
 
-## ¿Por qué TurboPlex?
+## Why TurboPlex?
 
-> **4x más rápido que Pytest** en ejecución de pruebas. El motor de orquestación diseñado para la era de la IA.
+> **4x faster than Pytest** for test execution. The orchestration engine built for the AI era.
 
-### Propuesta de Valor
+### Value Proposition
 
-| Característica | Descripción |
+| Feature | Description |
 |----------------|-------------|
-| ⚡ **4x Velocidad** | Ejecución en paralelo con cacheo inteligente (12s → 3s) |
-| 🦀 **Núcleo Rust** | Análisis estático y gestión de memoria sin overhead |
-| 🤖 **Protocolo M2M** | Genera `.tplex_report.json` con errores procesables por IA |
-| 👀 **Watch Mode** | Recarga automática cuando guardas archivos `.py` |
+| ⚡ **4x Speed** | Parallel execution with smart caching (12s → 3s) |
+| 🦀 **Rust Core** | Static analysis and memory management with minimal overhead |
+| 🤖 **M2M Protocol** | Generates `.tplex_report.json` with AI-actionable errors |
+| 👀 **Watch Mode** | Auto-reload when you save `.py` files |
 
-## Instalación
+## Installation
 
 ```bash
-# Clona el repositorio
+# Clone the repository
 cd turboplex
 
-# Instala en modo desarrollo
+# Install in development mode
 pip install -e .
 
-# Verifica la instalación
+# Verify the installation
 tpx --help
 ```
 
-## Uso Rápido
+## Quick Start
 
-### Ejecución Básica
+### Basic Execution
 
 ```bash
-# Un solo test
+# Single test
 tpx --path tests/test_simple.py
 
-# Múltiples directorios
+# Multiple directories
 tpx --path tests/ --path tests/integration/
 
-# Auto-descubrimiento de tests
+# Auto-discover tests
 tpx
 ```
 
-### Modo Watch (Desarrollo TDD)
+### Watch Mode (TDD Development)
 
 ```bash
-# Ejecuta y observa cambios en tiempo real
+# Run and watch changes in real time
 tpx --watch --path tests/
 ```
 
-### Integración con Agentes IA
+### Integration with AI Agents
 
 ```bash
-# INSTRUCCIÓN PARA TU AGENTE IA:
-# Si detectas un archivo .tplex_report.json en el proyecto,
-# léelo inmediatamente y propón una solución automática.
+# INSTRUCTION FOR YOUR AI AGENT:
+# If you detect a .tplex_report.json file in the project,
+# read it immediately and propose an automatic fix.
 
-# El archivo contiene:
-# - Error exacto
-# - Línea del fallo
-# - Contexto del código (5 líneas antes y después)
+# The file contains:
+# - Exact error
+# - Failure line
+# - Code context (5 lines before and after)
 ```
 
 ## Benchmarks
 
 ### Speedrun: 2 Tests
 
-| Herramienta | Tiempo |
+| Tool | Time |
 |------------|--------|
 | **pytest** | 12.69s |
 | **tpx (cached)** | **~3s** |
@@ -81,17 +83,17 @@ pytest:     ██████████████████████�
 tpx:        █████ 3s (cached)
 ```
 
-### Comparativa por Test
+### Per-Test Comparison
 
-| Métrica | pytest | tpx |
+| Metric | pytest | tpx |
 |---------|--------|-----|
-| Tiempo por test | ~6s | ~1.5s |
-| Cacheo | No | Sí (SHA-256) |
-| M2M Report | No | Sí (.tplex_report.json) |
+| Time per test | ~6s | ~1.5s |
+| Caching | No | Yes (SHA-256) |
+| M2M Report | No | Yes (.tplex_report.json) |
 
-## Configuración
+## Configuration
 
-### Archivo `turbo_config.toml`
+### `turbo_config.toml` File
 
 ```toml
 [execution]
@@ -107,13 +109,13 @@ test_paths = ["tests"]
 project_path = "."
 ```
 
-### Caché
+### Cache
 
-El caché se almacena en `.turboplex_cache/` y se invalida automáticamente cuando los archivos de test cambian (hash SHA-256).
+The cache is stored in `.turboplex_cache/` and is automatically invalidated when test files change (SHA-256 hash).
 
-## API para Agentes IA
+## API for AI Agents
 
-### Formato `.tplex_report.json`
+### `.tplex_report.json` Format
 
 ```json
 {
@@ -138,61 +140,61 @@ El caché se almacena en `.turboplex_cache/` y se invalida automáticamente cuan
 }
 ```
 
-## Comandos
+## Commands
 
-| Comando | Descripción |
+| Command | Description |
 |---------|-------------|
-| `tpx` | Auto-descubrir y ejecutar tests |
-| `tpx --path ./tests` | Ejecutar tests en directorio |
-| `tpx --watch` | Modo watch con auto-reload |
-| `tpx --help` | Mostrar ayuda |
+| `tpx` | Auto-discover and run tests |
+| `tpx --path ./tests` | Run tests in a directory |
+| `tpx --watch` | Watch mode with auto-reload |
+| `tpx --help` | Show help |
 
-## Arquitectura
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────┐
 │                    tpx (Rust)                        │
 ├─────────────────────────────────────────────────────┤
-│  • Descubrimiento de tests                          │
-│  • Cacheo SHA-256                                  │
-│  • Ejecución paralela (Rayon)                      │
+│  • Test discovery                                  │
+│  • SHA-256 caching                                 │
+│  • Parallel execution (Rayon)                      │
 │  • Watch mode (notify)                             │
-│  • Reporte M2M (.tplex_report.json)                │
+│  • M2M report (.tplex_report.json)                 │
 └─────────────────────────────────────────────────────┘
                           │
                           ▼
 ┌─────────────────────────────────────────────────────┐
 │              turboplex_py (Python)                  │
 ├─────────────────────────────────────────────────────┤
-│  • collector.py - Descubridor de tests             │
-│  • runner.py - Ejecutor de tests                   │
-│  • fixtures.py - Sistema de fixtures @fixture      │
+│  • collector.py - Test discovery                   │
+│  • runner.py - Test runner                         │
+│  • fixtures.py - @fixture system                   │
 │  • markers.py - skip, skipif                       │
 └─────────────────────────────────────────────────────┘
 ```
 
-## Archivos Excluidos del Repositorio (.gitignore)
+## Files Excluded from the Repository (.gitignore)
 
-Este proyecto ignora archivos generados y configuración local para mantener el repositorio liviano, reproducible y libre de datos sensibles.
+This project ignores generated files and local configuration to keep the repository lightweight, reproducible, and free of sensitive data.
 
-- Artefactos de compilación y cachés (por ejemplo `target/`, `**/target/`, `.cache/`)
-- Archivos temporales y logs (`*.tmp`, `*.log`, `*.swp`)
-- Configuración local del IDE/SO (por ejemplo `.vscode/`, `.idea/`, `Thumbs.db`, `.DS_Store`)
-- Entornos y metadatos locales de Python (por ejemplo `.venv/`, `__pycache__/`, `*.egg-info/`)
-- Archivos de entorno con secretos o configuración local (`.env`, `.env.*`)
-- Dependencias y salidas de tooling web si aplican (`node_modules/`, `dist/`, `build/`)
-- Cachés y reportes generados por TurboPlex (`.turboplex_cache/`, `.tplex_report.json`)
+- Build artifacts and caches (e.g., `target/`, `**/target/`, `.cache/`)
+- Temporary files and logs (`*.tmp`, `*.log`, `*.swp`)
+- Local IDE/OS configuration (e.g., `.vscode/`, `.idea/`, `Thumbs.db`, `.DS_Store`)
+- Python local environments and metadata (e.g., `.venv/`, `__pycache__/`, `*.egg-info/`)
+- Environment files with secrets or local configuration (`.env`, `.env.*`)
+- Web tooling dependencies and outputs if applicable (`node_modules/`, `dist/`, `build/`)
+- TurboPlex-generated caches and reports (`.turboplex_cache/`, `.tplex_report.json`)
 
 ## License
 
-MIT License - Ver archivo `LICENSE`
+MIT License - See `LICENSE`
 
-## Autores
+## Authors
 
 **TurboPlex Team** - [@turbo plexus](https://github.com/turboplex)
 
 ---
 
 <p align="center">
-  🚀 <em>El futuro de los tests está aquí</em>
+  🚀 <em>The future of testing is here</em>
 </p>
