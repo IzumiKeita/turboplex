@@ -61,3 +61,5 @@ coverage/
 .turboplex_cache/
 .tplex_report.json
 *.tplex_report.json
+
+/publish.bat
