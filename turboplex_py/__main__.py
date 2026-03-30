@@ -1,7 +1,16 @@
 #!/usr/bin/env python3
 """Wrapper that calls the Rust binary for main commands, but handles collect/run directly."""
 
+# CRITICAL: Bootstrap SQLAlchemy patcher BEFORE any imports that might import SQLAlchemy
+# This ensures all DB operations are intercepted and made lazy
 import os
+if os.environ.get("TURBOTEST_SUBPROCESS") == "1":
+    try:
+        from turboplex_py.pytest_bootstrap import ensure_patchers
+        ensure_patchers()
+    except Exception:
+        pass  # Ignore bootstrap errors, we'll handle them later
+
 import sys
 import subprocess
 
@@ -67,6 +76,16 @@ def main():
     
     # Normal mode - check if this is a direct call to collect or run (subcommand)
     if len(sys.argv) > 1 and sys.argv[1] in ("collect", "run"):
+        # Set TURBOTEST_SUBPROCESS to indicate we're in TurboPlex mode
+        os.environ["TURBOTEST_SUBPROCESS"] = "1"
+        
+        # Bootstrap patchers for direct mode too
+        try:
+            from turboplex_py.pytest_bootstrap import ensure_patchers
+            ensure_patchers()
+        except Exception:
+            pass
+        
         # Import and run the Python module directly
         from turboplex_py.collector import collect_main
         from turboplex_py.runner import run_main

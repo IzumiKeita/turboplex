@@ -12,6 +12,9 @@
 - Se expusieron tools MCP para `discover`, `run` y `get_report` para control desde el IDE.
 - Se preparó release 0.2.3: bump de versiones (Rust/Python) y se añadió `mcp` como dependencia de producción para `tpx mcp`.
 - Se preparó release 0.2.4: bump de versiones (Rust/Python) y actualización de README con `--out-json`, timeouts estructurados y refuerzo de UTF-8.
+- Se preparó release 0.2.5: compat MCP (pytest) más robusto en Windows usando un ejecutable Python real (`TPX_PYTHON_EXE`/auto-resolve) + timeouts configurables.
+- Se preparó release 0.2.6: salida centralizada (mpsc) con default silencioso + barra de progreso única, `--verbose` para debug, `--json` para stdout estructurado y `--out-json` como backup en disco.
+- Se preparó release 0.2.7: bump de versión (Rust/Python) para publicar en PyPI.
 - Se actualizó README.md con `--compat`, `tpx mcp`, tools MCP y detalles del fingerprint del cache.
 
 ### MCP stdio (blindaje)
@@ -21,6 +24,7 @@
 - Se configuró UTF-8 para el proceso MCP en Windows (`PYTHONIOENCODING=utf-8`, `PYTHONUTF8=1`).
 - Se agregó aislamiento por archivo JSON (`--out-json`) para collector/runner en Python y para su invocación desde MCP, evitando contaminación de stdout.
 - Se agregaron timeouts estructurados en subprocesses (pytest y turboplex) con errores tipo `{kind: timeout|subprocess_failed, phase, ...}` y variables `TPX_MCP_*_TIMEOUT_S` para configurar.
+- Se implementó drenaje asíncrono de pipes + heartbeat periódico en subprocesses del MCP (Popen + threads + terminate/kill en timeout) para evitar freezes en Windows y timeouts por “silencio”.
 
 ### Refactorización (límite 600 líneas)
 - Se convirtió `src/main.rs` en un wrapper mínimo y se movió la lógica del binario a `src/main/mod.rs` + `src/main/part1.rs` (runtime Python, hashing, discovery) + `src/main/part2.rs` (collect/ejecución/reporte).

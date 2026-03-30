@@ -15,12 +15,12 @@ echo [2/3] Configurando variables de entorno para Maturin...
 set "MATURIN_USERNAME=__token__"
 set "MATURIN_PASSWORD=%PYPI_TOKEN%"
 
-echo [3/3] Publicando version 0.2.4 en PyPI...
+echo [3/3] Publicando version 0.3.0 en PyPI...
 python -m maturin publish --skip-existing
 
 if %ERRORLEVEL% EQU 0 (
     echo.
-    echo [EXITO] TurboPlex v0.2.4 ha sido publicado correctamente.
+    echo [EXITO] TurboPlex v0.3.0 ha sido publicado correctamente.
 ) else (
     echo.
     echo [ERROR] Hubo un problema al publicar. Revisa los logs arriba.

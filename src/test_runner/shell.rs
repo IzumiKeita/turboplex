@@ -35,6 +35,7 @@ pub fn run_test(test: &TestDefinition, test_file: &Path, ctx: &TestContext) -> T
             cached: false,
             duration_ms,
             error: Some(format!("Timed out after {}ms (process killed)", timeout_ms)),
+            enriched_data: None,
         },
         Ok(cap) => {
             let exit_code = cap.status.unwrap_or(-1);
@@ -70,6 +71,7 @@ pub fn run_test(test: &TestDefinition, test_file: &Path, ctx: &TestContext) -> T
                 cached: false,
                 duration_ms,
                 error,
+                enriched_data: None,
             }
         }
         Err(e) => TestResult {
@@ -78,6 +80,7 @@ pub fn run_test(test: &TestDefinition, test_file: &Path, ctx: &TestContext) -> T
             cached: false,
             duration_ms,
             error: Some(e.to_string()),
+            enriched_data: None,
         },
     };
 

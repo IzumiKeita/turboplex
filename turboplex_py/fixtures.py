@@ -9,15 +9,30 @@ from types import ModuleType
 from typing import Any, Callable
 
 
-def fixture(fn: Callable[..., Any]) -> Callable[..., Any]:
-    """Register a fixture callable by its function name on the module."""
-    setattr(fn, "_tt_fixture", True)
-    # Use the module globals dict so registration works during importlib exec_module
-    reg = fn.__globals__.setdefault("__tt_fixtures__", {})
-    if not isinstance(reg, dict):
-        raise TypeError("@fixture registry corrupted")
-    reg[fn.__name__] = fn
-    return fn
+def fixture(fn: Callable[..., Any] | None = None, *, scope: str = "function", autouse: bool = False) -> Callable[..., Any]:
+    """Register a fixture callable by its function name on the module.
+    
+    Compatible with pytest.fixture API (scope and autouse arguments are accepted
+    but currently ignored for compatibility).
+    """
+    def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+        setattr(func, "_tt_fixture", True)
+        # Store scope info as attribute for future use
+        setattr(func, "_tt_fixture_scope", scope)
+        setattr(func, "_tt_fixture_autouse", autouse)
+        # Use the module globals dict so registration works during importlib exec_module
+        reg = func.__globals__.setdefault("__tt_fixtures__", {})
+        if not isinstance(reg, dict):
+            raise TypeError("@fixture registry corrupted")
+        reg[func.__name__] = func
+        return func
+    
+    if fn is not None:
+        # Called as @fixture (without parentheses)
+        return decorator(fn)
+    else:
+        # Called as @fixture() or @fixture(scope="...")
+        return decorator
 
 
 def _load_turbofix_fixtures(test_module: ModuleType) -> dict[str, Callable[..., Any]]:
@@ -141,24 +156,42 @@ def build_kwargs_for_callable(
         kwargs.update(parametrize_kwargs)
 
     seen_self = False
-    for pname, p in sig.parameters.items():
-        if skip_self and not seen_self and pname == "self":
-            seen_self = True
-            continue
-        if p.kind != inspect.Parameter.POSITIONAL_OR_KEYWORD:
-            raise RuntimeError(
-                f"test callable: parameter {pname!r} must be positional/keyword (v1)"
-            )
+    try:
+        for pname, p in sig.parameters.items():
+            if skip_self and not seen_self and pname == "self":
+                seen_self = True
+                continue
+            if p.kind != inspect.Parameter.POSITIONAL_OR_KEYWORD:
+                raise RuntimeError(
+                    f"test callable: parameter {pname!r} must be positional/keyword (v1)"
+                )
 
-        # Skip if already provided by parametrize
-        if pname in kwargs:
-            continue
+            # Skip if already provided by parametrize
+            if pname in kwargs:
+                continue
 
-        if pname in fixtures:
-            kwargs[pname] = _resolve_one(mod, fixtures, pname, cache, stack)
-        elif p.default is inspect.Parameter.empty:
-            raise RuntimeError(
-                f"parameter {pname!r} has no @fixture and no default"
-            )
+            if pname in fixtures:
+                kwargs[pname] = _resolve_one(mod, fixtures, pname, cache, stack)
+            elif p.default is inspect.Parameter.empty:
+                raise RuntimeError(
+                    f"parameter {pname!r} has no @fixture and no default"
+                )
+    finally:
+        # Always cleanup generators to prevent resource leaks
+        _cleanup_fixtures_cache(cache)
 
     return kwargs
+
+
+def _cleanup_fixtures_cache(cache: dict[str, Any]) -> None:
+    """Close any generator fixtures to prevent resource leaks."""
+    for key in list(cache.keys()):
+        if key.endswith("_generator"):
+            try:
+                gen = cache[key]
+                if hasattr(gen, 'close'):
+                    gen.close()
+            except Exception:
+                pass  # Ignore cleanup errors
+            finally:
+                cache.pop(key, None)

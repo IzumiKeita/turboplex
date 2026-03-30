@@ -10,6 +10,7 @@ use std::time::{Instant, SystemTime};
 use turboplex::{load_config, TestResult};
 use walkdir::WalkDir;
 
+use super::output::{emit_error, OutputMode, OutputOptions, OutputState, TestEvent};
 use super::part1::{
     compute_file_hash, compute_text_hash, get_collected_tests_cache_path, get_test_cache_dir,
     get_test_files_hash, get_test_results_cache_dir, RuntimePythonEnv,
@@ -42,7 +43,7 @@ fn generate_failure_report(
     results: &[(PathBuf, TestResult)],
     _test_paths: &[String],
     base_dir: &Path,
-) {
+) -> Option<PathBuf> {
     let mut report = json!({
         "timestamp": chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
         "total_tests": results.len(),
@@ -90,9 +91,10 @@ fn generate_failure_report(
 
     let report_path = base_dir.join(".tplex_report.json");
     if let Ok(content) = serde_json::to_string_pretty(&report) {
-        let _ = fs::write(report_path, content);
-        println!("\n{} Report generated: .tplex_report.json", "📄".yellow());
+        let _ = fs::write(&report_path, content);
+        return Some(report_path);
     }
+    None
 }
 
 fn run_pytest_collect(
@@ -143,6 +145,12 @@ fn run_python_collector(
         return run_pytest_collect(paths, env);
     }
 
+    eprintln!("[RUST DEBUG] Starting Python collector");
+    eprintln!("[RUST DEBUG] Interpreter: {}", env.interpreter);
+    eprintln!("[RUST DEBUG] Module: {}", env.module);
+    eprintln!("[RUST DEBUG] Paths: {:?}", paths);
+    eprintln!("[RUST DEBUG] CWD: {:?}", env.cwd);
+
     let mut cmd = Command::new(&env.interpreter);
     cmd.current_dir(&env.cwd);
     cmd.arg("-m");
@@ -154,15 +162,22 @@ fn run_python_collector(
     cmd.arg(&out_json_path);
     if let Some(pp) = &env.pythonpath {
         cmd.env("PYTHONPATH", pp);
+        eprintln!("[RUST DEBUG] PYTHONPATH: {}", pp);
     }
     cmd.env("SQLALCHEMY_SILENCE_UBER_WARNING", "1");
     cmd.env("SQLALCHEMY_LOG", "0");
     cmd.env("TURBOTEST_SUBPROCESS", "1");
     apply_python_encoding_env(&mut cmd);
 
+    eprintln!("[RUST DEBUG] Running command: {:?}", cmd);
+    eprintln!("[RUST DEBUG] Waiting for collector output...");
+
     let output = cmd
         .output()
         .map_err(|e| format!("Failed to run collector: {}", e))?;
+
+    eprintln!("[RUST DEBUG] Collector finished with status: {:?}", output.status);
+    eprintln!("[RUST DEBUG] Collector stderr: {}", String::from_utf8_lossy(&output.stderr).trim());
 
     let file_text = fs::read_to_string(&out_json_path)
         .map_err(|e| format!("collector did not produce out-json file: {}", e));
@@ -181,10 +196,15 @@ fn run_python_collector(
     }
 
     let text = file_text?;
+    eprintln!("[RUST DEBUG] Collector output file content (first 200 chars): {}", &text[..text.len().min(200)]);
+    
     let parsed: serde_json::Value = serde_json::from_str(text.trim())
         .map_err(|e| format!("Failed to parse collector out-json: {}", e))?;
 
-    Ok(parsed["items"].as_array().cloned().unwrap_or_default())
+    let items = parsed["items"].as_array().cloned().unwrap_or_default();
+    eprintln!("[RUST DEBUG] Collected {} tests", items.len());
+
+    Ok(items)
 }
 
 fn load_cached_pass_result(
@@ -205,6 +225,7 @@ fn load_cached_pass_result(
         cached: true,
         duration_ms: 0,
         error: None,
+        enriched_data: None,
     })
 }
 
@@ -264,6 +285,7 @@ fn run_python_test(env: &RuntimePythonEnv, path: &str, qual: &str) -> TestResult
                             .and_then(|v| v.as_u64())
                             .unwrap_or(duration_ms),
                         error: resp.get("error").and_then(|v| v.as_str()).map(String::from),
+                        enriched_data: Some(resp),
                     };
                 }
             }
@@ -282,6 +304,7 @@ fn run_python_test(env: &RuntimePythonEnv, path: &str, qual: &str) -> TestResult
                         .and_then(|v| v.as_u64())
                         .unwrap_or(duration_ms),
                     error: resp.get("error").and_then(|v| v.as_str()).map(String::from),
+                    enriched_data: Some(resp),
                 }
             } else {
                 TestResult {
@@ -294,6 +317,7 @@ fn run_python_test(env: &RuntimePythonEnv, path: &str, qual: &str) -> TestResult
                     } else {
                         Some(String::from_utf8_lossy(&out.stderr).to_string())
                     },
+                    enriched_data: None,
                 }
             }
         }
@@ -303,6 +327,7 @@ fn run_python_test(env: &RuntimePythonEnv, path: &str, qual: &str) -> TestResult
             cached: false,
             duration_ms,
             error: Some(format!("Failed to run test: {}", e)),
+            enriched_data: None,
         },
     }
 }
@@ -343,6 +368,7 @@ fn run_pytest_test(env: &RuntimePythonEnv, nodeid: &str) -> TestResult {
                 cached: false,
                 duration_ms,
                 error: err,
+                enriched_data: None,
             }
         }
         Err(e) => TestResult {
@@ -351,6 +377,7 @@ fn run_pytest_test(env: &RuntimePythonEnv, nodeid: &str) -> TestResult {
             cached: false,
             duration_ms,
             error: Some(format!("Failed to run pytest: {}", e)),
+            enriched_data: None,
         },
     }
 }
@@ -384,16 +411,25 @@ fn get_or_collect_tests(
     paths: &[String],
     env: &RuntimePythonEnv,
 ) -> Result<Vec<serde_json::Value>, String> {
+    eprintln!("[RUST DEBUG] get_or_collect_tests() called");
+    
     let cache_dir = get_test_cache_dir(&env.cwd);
     let cache_file = get_collected_tests_cache_path(&env.cwd);
     let hash_file = cache_dir.join("files_hash.txt");
+    
+    eprintln!("[RUST DEBUG] Cache dir: {:?}", cache_dir);
+    eprintln!("[RUST DEBUG] Cache file: {:?}", cache_file);
 
     let mut test_files: Vec<PathBuf> = Vec::new();
+    eprintln!("[RUST DEBUG] Walking test paths...");
     for p in paths {
+        eprintln!("[RUST DEBUG] Processing path: {}", p);
         let pb = resolve_test_path(env, p);
         if pb.is_file() {
+            eprintln!("[RUST DEBUG] Found file: {:?}", pb);
             test_files.push(pb);
         } else {
+            eprintln!("[RUST DEBUG] Walking directory: {:?}", pb);
             let walker = WalkDir::new(&pb).max_depth(10);
             for entry in walker.into_iter().filter_map(|e| e.ok()) {
                 if entry.file_type().is_file() {
@@ -401,28 +437,37 @@ fn get_or_collect_tests(
                     if (name.starts_with("test_") || name.ends_with("_test.py"))
                         && name.ends_with(".py")
                     {
+                        eprintln!("[RUST DEBUG] Found test file: {}", name);
                         test_files.push(entry.path().to_path_buf());
                     }
                 }
             }
         }
     }
+    eprintln!("[RUST DEBUG] Total test files found: {}", test_files.len());
 
     let current_hash = get_test_files_hash(&test_files, &env.fingerprint);
+    eprintln!("[RUST DEBUG] Current hash: {}", current_hash);
 
     if let (Ok(cached_content), Ok(stored_hash)) = (
         fs::read_to_string(&cache_file),
         fs::read_to_string(&hash_file),
     ) {
+        eprintln!("[RUST DEBUG] Cache exists, stored_hash: {}", stored_hash.trim());
         if stored_hash.trim() == current_hash {
+            eprintln!("[RUST DEBUG] Cache HIT, returning cached tests");
             let parsed: serde_json::Value = serde_json::from_str(&cached_content)
                 .map_err(|e| format!("Invalid cache: {}", e))?;
             return Ok(parsed["items"].as_array().cloned().unwrap_or_default());
         }
+        eprintln!("[RUST DEBUG] Cache MISS, collecting fresh");
+    } else {
+        eprintln!("[RUST DEBUG] No cache found, collecting fresh");
     }
 
-    println!("  {} Collecting tests...", "📦".cyan());
+    eprintln!("[RUST DEBUG] About to call run_python_collector...");
     let items = run_python_collector(paths, env)?;
+    eprintln!("[RUST DEBUG] run_python_collector returned {} items", items.len());
 
     let _ = fs::create_dir_all(&cache_dir);
     let cache_content = json!({ "items": items }).to_string();
@@ -445,6 +490,7 @@ pub(crate) fn run_tests_with_paths(
     paths_to_use: &[String],
     watch_mode: bool,
     env: &RuntimePythonEnv,
+    out: &OutputOptions,
 ) {
     let config_paths = [
         "turbo_config.toml",
@@ -457,31 +503,40 @@ pub(crate) fn run_tests_with_paths(
         .map(|p| load_config(p))
         .unwrap_or_default();
 
-    println!(
-        "\n[Config]: workers={}",
-        config.execution.max_workers.unwrap_or(8)
-    );
-    println!("\n{} {}", "📁".cyan().bold(), "Test directories:".bold());
-    for p in paths_to_use {
-        println!("   - {}", p);
+    if out.mode == OutputMode::Verbose {
+        println!(
+            "\n[Config]: workers={}",
+            config.execution.max_workers.unwrap_or(8)
+        );
+        println!("\n{} {}", "📁".cyan().bold(), "Test directories:".bold());
+        for p in paths_to_use {
+            println!("   - {}", p);
+        }
     }
 
+    if out.mode == OutputMode::Verbose {
+        println!("Collecting tests...");
+    }
     let test_items = match get_or_collect_tests(paths_to_use, env) {
         Ok(items) => items,
         Err(e) => {
-            eprintln!("{} Failed to collect tests: {}", "ERROR".red(), e);
+            let msg = format!("Failed to collect tests: {}", e);
+            let _ = emit_error(out, &env.cwd, &msg);
+            if !out.wants_json() {
+                eprintln!("ERROR {}", msg);
+            }
             return;
         }
     };
 
     let total_tests = test_items.len();
     if total_tests == 0 {
-        println!("\n{}", "No tests found.".yellow());
+        let state = OutputState::new(out.clone(), 0);
+        let _ = state.finalize(&env.cwd, None, None);
         return;
     }
 
-    println!("\n{} Found {} tests", "✓".green(), total_tests);
-    println!("\n{} Running tests...\n", "⚡".cyan().bold());
+    let mut state = OutputState::new(out.clone(), total_tests);
 
     let num_threads = config.execution.max_workers.unwrap_or(8).min(total_tests);
     let (tx, rx) = channel();
@@ -497,71 +552,40 @@ pub(crate) fn run_tests_with_paths(
             let chunk: Vec<serde_json::Value> = chunk.to_vec();
             let env = env.clone();
             thread::spawn(move || {
-                let mut results = Vec::new();
                 for item in &chunk {
                     let path = item["path"].as_str().unwrap_or("");
                     let qual = item["qualname"].as_str().unwrap_or("");
                     let resolved = resolve_test_path(&env, path);
                     let result = run_test_item(&env, path, qual);
-                    results.push((resolved, result));
+                    let _ = tx.send(TestEvent::Finished {
+                        path: resolved,
+                        result,
+                    });
                 }
-                let _ = tx.send(results);
             })
         })
         .collect();
 
     drop(tx);
 
-    let mut all_results = Vec::new();
-    for r in rx {
-        all_results.extend(r);
+    for ev in rx {
+        state.push(ev);
     }
 
     for h in handles {
         let _ = h.join();
     }
 
-    let mut passed = 0;
-    let mut failed = 0;
+    let failed_any = state.results().iter().any(|(_, r)| !r.passed);
+    let report_path = if failed_any {
+        generate_failure_report(state.results(), paths_to_use, &env.cwd)
+    } else {
+        None
+    };
 
-    for (path, result) in &all_results {
-        let file = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown");
-        let label = format!("{} :: {}", file, result.test_name);
-
-        if result.passed {
-            println!(
-                "  {} [PASS] {} ({}ms)",
-                "OK".green(),
-                label.bold(),
-                result.duration_ms
-            );
-            passed += 1;
-        } else {
-            println!(
-                "  {} [FAIL] {} ({}ms)",
-                "XX".red(),
-                label.bold(),
-                result.duration_ms
-            );
-            if let Some(ref err) = result.error {
-                println!("        |-- Error: {}", err.red());
-            }
-            failed += 1;
-        }
-    }
-
-    println!(
-        "\n  Results: {} passed, {} failed",
-        passed.to_string().green(),
-        failed.to_string().red()
-    );
-
-    if failed > 0 {
-        generate_failure_report(&all_results, paths_to_use, &env.cwd);
-    }
+    let (_, failed) = state
+        .finalize(&env.cwd, report_path.as_deref(), None)
+        .unwrap_or((0, 1));
 
     if !watch_mode && failed > 0 {
         std::process::exit(1);

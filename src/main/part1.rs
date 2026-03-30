@@ -19,13 +19,36 @@ Usage:
     tpx --path ./tests     # Run tests in specific directory
     tpx --watch            # Watch for file changes and re-run
     tpx --compat           # Ejecuta los tests vía pytest (fixtures/conftest)
+    tpx --light            # Collect rápido sin cargar conftest.py (ideal para MCP/IDE)
     tpx --help            # Show this help
 
 Options:
     --path, -p <dir>    Run tests in specific directory
     --watch, -w         Watch for file changes and re-run
     --compat            Delegar ejecución a pytest
+    --light             Modo light: collect sin conftest (rápido, sin DB setup)
+    --quiet             Modo silencioso (solo fallos + resumen)
+    --verbose           Modo detallado (línea por test)
+    --json              Emite un único JSON por stdout (sin logs)
+    --out-json <path>   Escribe el JSON final a un archivo (backup del IDE)
     --help, -h          Show this help message
+
+MCP Environment Variables:
+    TPX_PYTHON_EXE              # Forzar Python específico (ej: C:\venv\Scripts\python.exe)
+    TPX_MCP_DEBUG=1             # Activar debug tracing a stderr
+    TPX_MCP_LIGHT_COLLECT=1     # Collect rápido sin cargar conftest.py (--confcutdir)
+                                 # Ideal para proyectos donde conftest.py inicializa DB/migraciones
+    TPX_MCP_STDOUT_MODE         # redirect (default) o failfast para JSON-RPC
+    TPX_MCP_PYTEST_COLLECT_TIMEOUT_S   # Timeout collect (default: 120s)
+    TPX_MCP_PYTEST_RUN_TIMEOUT_S         # Timeout run (default: 60s)
+
+Examples:
+    # Proyecto con conftest.py pesado (ej: crea tablas DB al importar)
+    set TPX_MCP_LIGHT_COLLECT=1
+    tpx --compat
+
+    # IDE con MCP (Windsurf/Cursor) - configura en mcp_config.json:
+    # "env": {{ "TPX_MCP_LIGHT_COLLECT": "1", "TPX_PYTHON_EXE": "..." }}
 
 Aliases:
     turboplex          # Alias for tpx
@@ -224,21 +247,26 @@ pub(crate) fn build_runtime_python_env(compat: bool, extra_flags: &str) -> Runti
         .unwrap_or_default();
 
     let py_cfg = python_config_effective(&config);
-    let interpreter = py_cfg
-        .interpreter
-        .clone()
-        .unwrap_or_else(|| "python".to_string());
+    
+    // Try to find venv Python first
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let venv_python = find_venv_python(&cwd);
+    
+    let interpreter = venv_python.or_else(|| {
+        py_cfg.interpreter.clone()
+    }).unwrap_or_else(|| "python".to_string());
+    
     let module = py_cfg
         .module
         .clone()
         .unwrap_or_else(|| "turboplex_py".to_string());
 
-    let cwd = if let Some(proj) = py_cfg.project_path.clone() {
+    let proj_cwd = if let Some(proj) = py_cfg.project_path.clone() {
         PathBuf::from(proj)
     } else {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        cwd.clone()
     };
-    let root = find_project_root(&cwd);
+    let root = find_project_root(&proj_cwd);
     let pythonpath = merge_pythonpath(&pythonpath_candidates(&root, &py_cfg));
     let pyver = detect_python_version(&interpreter, &root, pythonpath.as_deref())
         .unwrap_or_else(|| "unknown".to_string());
@@ -258,6 +286,31 @@ pub(crate) fn build_runtime_python_env(compat: bool, extra_flags: &str) -> Runti
         fingerprint,
         compat,
     }
+}
+
+fn find_venv_python(start_dir: &Path) -> Option<String> {
+    let venv_names = [".venv", "venv", ".env", "env"];
+    
+    // Check current dir and ancestors
+    for dir in std::iter::once(start_dir).chain(start_dir.ancestors().take(4)) {
+        for venv_name in &venv_names {
+            let venv_path = dir.join(venv_name);
+            if venv_path.is_dir() {
+                let python_exe = if cfg!(windows) {
+                    venv_path.join("Scripts").join("python.exe")
+                } else {
+                    venv_path.join("bin").join("python")
+                };
+                
+                if python_exe.exists() {
+                    eprintln!("Found venv Python: {}", python_exe.display());
+                    return Some(python_exe.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+    
+    None
 }
 
 pub(crate) fn discover_test_paths_from(base_dir: &Path, max_depth: usize) -> Vec<PathBuf> {

@@ -19,7 +19,8 @@
 | ⚡ **4x Speed** | Parallel execution with smart caching (12s → 3s) |
 | 🦀 **Rust Core** | Static analysis and memory management with minimal overhead |
 | 🤖 **M2M Protocol** | Generates `.tplex_report.json` with AI-actionable errors |
-| 👀 **Watch Mode** | Auto-reload when you save `.py` files |
+| � **AI Analysis** | `--analyze` command categorizes failures for debugging at scale |
+| � **Watch Mode** | Auto-reload when you save `.py` files |
 
 ## Installation
 
@@ -72,6 +73,25 @@ Use this when your suite relies on complex pytest fixtures (`conftest.py`, `clie
 tpx --compat --path tests/
 ```
 
+#### Light Collect Mode (`--light`)
+
+For projects with heavy `conftest.py` initialization (e.g., database migrations, schema creation), use `--light` to skip conftest loading during test discovery. This can reduce discovery time from **minutes to seconds**.
+
+```bash
+# Fast discovery for projects with heavy conftest.py
+tpx --compat --light
+
+# Or set the environment variable
+export TPX_MCP_LIGHT_COLLECT=1  # Linux/Mac
+set TPX_MCP_LIGHT_COLLECT=1     # Windows
+tpx --compat
+```
+
+**When to use:**
+- Your `conftest.py` initializes databases or runs migrations on import
+- Test discovery takes more than 10 seconds
+- You're using TurboPlex MCP with an IDE (Windsurf, Cursor, etc.)
+
 ### MCP Server (IDE Integration)
 
 ```bash
@@ -82,10 +102,32 @@ Notes:
 - For robustness, TurboPlex isolates tool payloads in JSON files (`--out-json`) to prevent stdout pollution.
 - Subprocesses enforce UTF-8 (`PYTHONUTF8=1`, `PYTHONIOENCODING=utf-8`, `PYTHONUNBUFFERED=1`) to avoid Windows encoding issues.
 - Timeouts are structured and configurable via environment variables:
+  - `TPX_PYTHON_EXE` - Force specific Python interpreter (useful for venvs on Windows).
+  - `TPX_MCP_LIGHT_COLLECT=1` - Skip conftest.py during discovery (for projects with heavy DB initialization).
+  - `TPX_MCP_DEBUG=1` - Enable debug tracing to stderr (shows commands, Python used, etc.).
+  - `TPX_MCP_STDOUT_MODE` - `redirect` (default) or `failfast` for JSON-RPC guarding.
   - `TPX_MCP_TURBOPLEX_COLLECT_TIMEOUT_S` (default 120)
   - `TPX_MCP_TURBOPLEX_RUN_TIMEOUT_S` (default 60)
-  - `TPX_MCP_PYTEST_COLLECT_TIMEOUT_S` (default 120)
-  - `TPX_MCP_PYTEST_RUN_TIMEOUT_S` (default 60)
+  - `TPX_MCP_PYTEST_COLLECT_TIMEOUT_S` or `TPX_PYTEST_COLLECT_TIMEOUT_S` (default 120)
+  - `TPX_MCP_PYTEST_RUN_TIMEOUT_S` or `TPX_PYTEST_RUN_TIMEOUT_S` (default 60)
+
+**Example MCP Configuration (Windsurf/Cursor):**
+
+```json
+{
+  "mcpServers": {
+    "tpx": {
+      "command": "tpx",
+      "args": ["mcp"],
+      "env": {
+        "TPX_PYTHON_EXE": "/path/to/venv/bin/python",
+        "TPX_MCP_LIGHT_COLLECT": "1",
+        "TPX_MCP_DEBUG": "1"
+      }
+    }
+  }
+}
+```
 
 Tools exposed over MCP:
 - `ping`
@@ -107,19 +149,71 @@ Tools exposed over MCP:
 # - Code context (5 lines before and after)
 ```
 
-## Benchmarks
+### AI-Driven Test Analysis (`--analyze`)
 
-### Speedrun: 2 Tests
+For large test suites with hundreds of failures, TurboPlex provides automatic error categorization and actionable recommendations. Tested on real-world production suites (~200 tests, ~3.2MB of failure data).
 
-| Tool | Time |
-|------------|--------|
-| **pytest** | 12.69s |
-| **tpx (cached)** | **~3s** |
+```bash
+# Run tests with full JSONL report generation
+tpx --path tests/
+
+# Analyze the generated report
+tpx --analyze
+```
+
+**Example Output:**
+```
+════════════════════════════════════════════════════════════
+          TurboPlex Analysis Report
+════════════════════════════════════════════════════════════
+
+📊 Summary
+   Total:  199
+   Passed: 35
+   Failed: 164
+   Rate:   17.6%
+
+🚨 Critical Issues
+   • 45 tests have database connectivity issues
+   • 12 tests have import errors - dependencies may be missing
+
+📋 Error Categories
+   [45] AuthError: Expected 200 got 403 - Authorization failures
+   [32] DatabaseError: Unique constraint violation
+   [28] FixtureError: Fixture setup failed
+   [20] AssertionError: Creation status mismatch
+   [15] ImportError: Missing module
+
+💡 Top Recommendations
+   1. Priority 45: Check authentication fixtures - ensure tests have valid credentials
+   2. Priority 32: Implement database cleanup between tests or use unique identifiers
+   3. Priority 28: Review fixture dependencies and ensure proper setup/teardown
+```
+
+**Generated Files:**
+- `turboplex_full_report.json` — Complete JSONL report with full error context (traceback, locals, diff)
+- Automatic categorization: Database errors, Auth failures, Import issues, Fixture problems
+- AI-ready JSON output for automated debugging pipelines
+
+### Speedrun: Production Suite (~200 tests)
+
+| Tool | Time | per test |
+|------|------|----------|
+| **pytest** | ~340s | ~1.7s |
+| **tpx (cold)** | ~180s | ~0.9s |
+| **tpx (cached)** | **~25s** | **~0.13s** |
 
 ```
-pytest:     ████████████████████████████ 12.69s
-tpx:        █████ 3s (cached)
+pytest (cold):  ████████████████████████████████████████ 340s
+tpx (cold):     ██████████████████████ 180s (2x faster)
+tpx (cached):   ███ 25s (14x faster, 82% cache hit)
 ```
+
+🖥️ **Tested on:**
+
+- CPU: Ryzen 7 5700X3D (8C/16T)
+- RAM: 16GB DDR4 @ 3600MHz
+- Storage: Crucial P3 NVMe Gen3 (1TB)
 
 ### Per-Test Comparison
 
@@ -186,6 +280,8 @@ The cache is stored in `.turboplex_cache/` and is automatically invalidated when
 | `tpx --path ./tests` | Run tests in a directory |
 | `tpx --watch` | Watch mode with auto-reload |
 | `tpx --compat` | Delegate discovery/execution to pytest for fixture-heavy suites |
+| `tpx --compat --light` | Fast discovery mode (skips conftest.py loading) |
+| `tpx --analyze` | Analyze test failures and categorize errors (requires `turboplex_full_report.json`) |
 | `tpx mcp` | Start the MCP server over stdio for IDE integration |
 | `tpx --help` | Show help |
 
@@ -195,21 +291,23 @@ The cache is stored in `.turboplex_cache/` and is automatically invalidated when
 ┌─────────────────────────────────────────────────────┐
 │                    tpx (Rust)                        │
 ├─────────────────────────────────────────────────────┤
-│  • Test discovery                                  │
-│  • SHA-256 caching                                 │
-│  • Parallel execution (Rayon)                      │
-│  • Watch mode (notify)                             │
-│  • M2M report (.tplex_report.json)                 │
+│  • Test discovery                                   │
+│  • SHA-256 caching                                  │
+│  • Parallel execution (Rayon)                       │
+│  • Watch mode (notify)                              │
+│  • M2M report (.tplex_report.json)                  │
+│  • JSONL reports (turboplex_full_report.json)       │
+│  • AI Analysis (--analyze)                          │
 └─────────────────────────────────────────────────────┘
                           │
                           ▼
 ┌─────────────────────────────────────────────────────┐
 │              turboplex_py (Python)                  │
 ├─────────────────────────────────────────────────────┤
-│  • collector.py - Test discovery                   │
-│  • runner.py - Test runner                         │
-│  • fixtures.py - @fixture system                   │
-│  • markers.py - skip, skipif                       │
+│  • collector.py - Test discovery                    │
+│  • runner.py - Test runner                          │
+│  • fixtures.py - @fixture system                    │
+│  • markers.py - skip, skipif                        │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -223,7 +321,7 @@ This project ignores generated files and local configuration to keep the reposit
 - Python local environments and metadata (e.g., `.venv/`, `__pycache__/`, `*.egg-info/`)
 - Environment files with secrets or local configuration (`.env`, `.env.*`)
 - Web tooling dependencies and outputs if applicable (`node_modules/`, `dist/`, `build/`)
-- TurboPlex-generated caches and reports (`.turboplex_cache/`, `.tplex_report.json`)
+- TurboPlex-generated caches and reports (`.turboplex_cache/`, `.tplex_report.json`, `turboplex_full_report.json`)
 
 ## License
 
@@ -232,7 +330,7 @@ MIT License - See `LICENSE`
 ## Authors
 Keita_Izumi
 
-**TurboPlex Team** - [@turbo plexus](https://github.com/IzumiKeita/turboplex)
+**TurboPlex Version:** 0.3.0 - [@turbo plexus](https://github.com/IzumiKeita/turboplex)
 
 ---
 

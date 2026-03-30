@@ -69,6 +69,7 @@ pub(crate) fn check_cache(
                         cached: true,
                         duration_ms: 0,
                         error: None,
+                        enriched_data: None,
                     });
                 }
             }

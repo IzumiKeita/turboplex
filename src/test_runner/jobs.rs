@@ -25,8 +25,12 @@ pub fn run_jobs_parallel(jobs: &[TestJob], ctx: &TestContext) -> Vec<(PathBuf, T
             }
             TestJob::Python { item } => {
                 let path = PathBuf::from(&item.path);
-                let result =
+                let (mut result, json_raw) =
                     super::python::run_python_item_fixed(item, &config, &cache_dir, &progress);
+                // Merge enriched data into result
+                if json_raw.is_some() {
+                    result.enriched_data = json_raw;
+                }
                 (path, result)
             }
         })

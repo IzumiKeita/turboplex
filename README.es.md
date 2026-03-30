@@ -33,7 +33,8 @@
 | ⚡ **4x Velocidad** | Ejecución en paralelo con cacheo inteligente (12s → 3s) |
 | 🦀 **Núcleo Rust** | Análisis estático y gestión de memoria sin overhead |
 | 🤖 **Protocolo M2M** | Genera `.tplex_report.json` con errores procesables por IA |
-| 👀 **Watch Mode** | Recarga automática cuando guardas archivos `.py` |
+| � **Análisis IA** | Comando `--analyze` categoriza fallos para debugging a escala |
+| � **Watch Mode** | Recarga automática cuando guardas archivos `.py` |
 
 <a id="es-instalacion"></a>
 ## Instalación
@@ -88,17 +89,71 @@ tpx --watch --path tests/
 <a id="es-benchmarks"></a>
 ## Benchmarks
 
-### Speedrun: 2 Tests
+### Análisis de Tests con IA (`--analyze`)
 
-| Herramienta | Tiempo |
-|------------|--------|
-| **pytest** | 12.69s |
-| **tpx (cached)** | **~3s** |
+Para suites de tests grandes con cientos de fallos, TurboPlex proporciona categorización automática de errores y recomendaciones accionables. Testeado en suites de producción reales (~200 tests, ~3.2MB de datos de fallo).
+
+```bash
+# Ejecutar tests con generación de reporte JSONL
+tpx --path tests/
+
+# Analizar el reporte generado
+tpx --analyze
+```
+
+**Salida de Ejemplo:**
+```
+════════════════════════════════════════════════════════════
+          TurboPlex Analysis Report
+════════════════════════════════════════════════════════════
+
+📊 Resumen
+   Total:  199
+   Exitosos: 35
+   Fallidos: 164
+   Tasa:   17.6%
+
+🚨 Issues Críticos
+   • 45 tests tienen problemas de conectividad a base de datos
+   • 12 tests tienen errores de importación - pueden faltar dependencias
+
+📋 Categorías de Error
+   [45] AuthError: Expected 200 got 403 - Fallos de autorización
+   [32] DatabaseError: Unique constraint violation
+   [28] FixtureError: Fixture setup failed
+   [20] AssertionError: Creation status mismatch
+   [15] ImportError: Missing module
+
+💡 Top Recomendaciones
+   1. Prioridad 45: Verificar fixtures de autenticación - asegurar credenciales válidas
+   2. Prioridad 32: Implementar limpieza de DB entre tests o usar identificadores únicos
+   3. Prioridad 28: Revisar dependencias de fixtures y asegurar setup/teardown correcto
+```
+
+**Archivos Generados:**
+- `turboplex_full_report.json` — Reporte JSONL completo con contexto de errores (traceback, locals, diff)
+- Categorización automática: Errores de DB, fallos de Auth, issues de import, problemas de fixtures
+- Salida JSON lista para IA para pipelines de debugging automatizado
+
+### Speedrun: Suite de Producción (~200 tests)
+
+| Herramienta | Tiempo | por test |
+|-------------|--------|----------|
+| **pytest** | ~340s | ~1.7s |
+| **tpx (cold)** | ~180s | ~0.9s |
+| **tpx (cached)** | **~25s** | **~0.13s** |
 
 ```
-pytest:     ████████████████████████████ 12.69s
-tpx:        █████ 3s (cached)
+pytest (cold):  ████████████████████████████████████████ 340s
+tpx (cold):     ██████████████████████ 180s (2x faster)
+tpx (cached):   ███ 25s (14x faster, 82% cache hit)
 ```
+
+🖥️ **Testeado en:**
+
+- CPU: Ryzen 7 5700X3D (8C/16T)
+- RAM: 16GB DDR4 @ 3600MHz
+- Storage: Crucial P3 NVMe Gen3 (1TB)
 
 ### Comparativa por Test
 
@@ -167,6 +222,10 @@ El caché se almacena en `.turboplex_cache/` y se invalida automáticamente cuan
 | `tpx` | Auto-descubrir y ejecutar tests |
 | `tpx --path ./tests` | Ejecutar tests en directorio |
 | `tpx --watch` | Modo watch con auto-reload |
+| `tpx --compat` | Delegar discovery/ejecución a pytest para suites con muchos fixtures |
+| `tpx --compat --light` | Modo discovery rápido (saltea carga de conftest.py) |
+| `tpx --analyze` | Analizar fallos de tests y categorizar errores (requiere `turboplex_full_report.json`) |
+| `tpx mcp` | Iniciar servidor MCP sobre stdio para integración IDE |
 | `tpx --help` | Mostrar ayuda |
 
 <a id="es-arquitectura"></a>
@@ -181,6 +240,8 @@ El caché se almacena en `.turboplex_cache/` y se invalida automáticamente cuan
 │  • Ejecución paralela (Rayon)                      │
 │  • Watch mode (notify)                             │
 │  • Reporte M2M (.tplex_report.json)                │
+│  • Reportes JSONL (turboplex_full_report.json)     │
+│  • Análisis IA (--analyze)                         │
 └─────────────────────────────────────────────────────┘
                           │
                           ▼
@@ -205,7 +266,7 @@ Este proyecto ignora archivos generados y configuración local para mantener el 
 - Entornos y metadatos locales de Python (por ejemplo `.venv/`, `__pycache__/`, `*.egg-info/`)
 - Archivos de entorno con secretos o configuración local (`.env`, `.env.*`)
 - Dependencias y salidas de tooling web si aplican (`node_modules/`, `dist/`, `build/`)
-- Cachés y reportes generados por TurboPlex (`.turboplex_cache/`, `.tplex_report.json`)
+- Cachés y reportes generados por TurboPlex (`.turboplex_cache/`, `.tplex_report.json`, `turboplex_full_report.json`)
 
 <a id="es-license"></a>
 ## License
@@ -215,7 +276,7 @@ MIT License - Ver archivo `LICENSE`
 <a id="es-autores"></a>
 ## Autores
 
-**TurboPlex Team** - [@turbo plexus](https://github.com/turboplex)
+**Versión TurboPlex:** 0.3.0 - **TurboPlex Team** - [@turbo plexus](https://github.com/turboplex)
 
 ---
 

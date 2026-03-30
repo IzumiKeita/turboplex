@@ -167,20 +167,65 @@ def _iter_test_files(paths: list[str]) -> list[pathlib.Path]:
     return uniq
 
 
-def _load_module(path: pathlib.Path):
+def _load_module(path: pathlib.Path, timeout_s: float = 30.0, conftest_dir: str | None = None):
+    """Load module with optional timeout to prevent hanging on heavy imports.
+    
+    Activates SQLAlchemy lazy patcher if conftest.py exists to avoid DB operations
+    during test collection.
+    """
+    import threading
+    import signal
+    
+    # Check if there's a conftest.py in the same directory or parent
+    patcher = None
+    test_dir = path.parent
+    for parent in [test_dir] + list(test_dir.parents):
+        conftest = parent / "conftest.py"
+        if conftest.exists():
+            try:
+                from .db_lazy_patcher import get_patcher
+                patcher = get_patcher()
+                patcher.patch_all()
+                logging.debug(f"Lazy patcher activated for {path} (found conftest at {conftest})")
+            except Exception as e:
+                logging.warning(f"Could not activate lazy patcher: {e}")
+            break
+    
     spec = importlib.util.spec_from_file_location(f"turbopy_{path.stem}", path)
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot load {path}")
     mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    
+    # Use threading to implement timeout for exec_module
+    result = {"exc": None, "done": False}
+    
+    def _exec():
+        try:
+            spec.loader.exec_module(mod)
+            result["done"] = True
+        except Exception as e:
+            result["exc"] = e
+    
+    thread = threading.Thread(target=_exec, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout_s)
+    
+    if not result["done"] and result["exc"] is None:
+        raise TimeoutError(f"Module import timed out after {timeout_s}s: {path}")
+    if result["exc"]:
+        raise result["exc"]
+    
     return mod
 
 
-def collect(paths: list[str]) -> list[dict[str, Any]]:
+def collect(paths: list[str], import_timeout_s: float = 60.0) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for path in _iter_test_files(paths):
         try:
-            mod = _load_module(path)
+            mod = _load_module(path, timeout_s=import_timeout_s)
+        except TimeoutError as e:
+            print(f"collect: timeout importing {path}: {e}", file=sys.stderr)
+            continue
         except Exception as e:
             print(f"collect: skip import {path}: {e}", file=sys.stderr)
             continue
