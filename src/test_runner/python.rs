@@ -192,6 +192,8 @@ struct PythonRunResponse {
     fixtures_used: Option<Vec<String>>,
     stdout: Option<String>,
     stderr: Option<String>,
+    skipped: Option<bool>,
+    skip_reason: Option<String>,
     // Legacy field for backward compatibility
     error: Option<String>,
 }
@@ -471,7 +473,13 @@ pub(crate) fn run_python_item_fixed(
         }
     }
 
-    if cfg.execution.cache_enabled && result.passed {
+    let is_skipped = json_raw
+        .as_ref()
+        .and_then(|v| v.get("skipped"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    if cfg.execution.cache_enabled && result.passed && !is_skipped {
         save_cache(
             cache_dir,
             &source,

@@ -7,13 +7,112 @@ permitiendo usar @pytest.fixture como si fuera @turboplex_py.fixture.
 from __future__ import annotations
 
 import inspect
-from typing import Any, Callable, Dict, Generator, List, Optional, TypeVar
+import logging
+from typing import Any, Callable, Dict, Generator, List, Optional, TypeVar, Tuple
 from functools import wraps
 
 from .fixtures import fixture as turboplex_fixture
 from .pytest_bridge import PytestBridge, PytestFixtureInfo
 
 F = TypeVar("F", bound=Callable[..., Any])
+
+# Diccionario de kwargs inyectados por el runner (ej: parametrización, mocks, etc.)
+_EXTRA_KWARGS: Dict[str, Any] = {}
+
+
+class LogCaptureHandler(logging.Handler):
+    """Handler para capturar logs durante tests (equivalente a caplog de pytest).
+    
+    Proporciona acceso a los registros de logging capturados durante la ejecución
+    de un test, permitiendo verificar mensajes, niveles y contenido.
+    
+    Ejemplo de uso:
+        def test_something(caplog):
+            logger.info("test message")
+            assert "test message" in caplog.text
+    """
+    
+    def __init__(self, level: int = logging.NOTSET):
+        super().__init__(level)
+        self.records: List[logging.LogRecord] = []
+        
+    def emit(self, record: logging.LogRecord) -> None:
+        """Captura un registro de log."""
+        self.records.append(record)
+        
+    @property
+    def record_tuples(self) -> List[Tuple[str, int, str]]:
+        """Retorna tuplas de (logger_name, level, message)."""
+        return [(r.name, r.levelno, r.message) for r in self.records]
+        
+    @property
+    def messages(self) -> List[str]:
+        """Retorna solo los mensajes de los registros."""
+        return [r.message for r in self.records]
+        
+    @property
+    def text(self) -> str:
+        """Retorna todos los mensajes como un string unido por newlines."""
+        return '\n'.join(self.messages)
+    
+    @property
+    def handler(self) -> 'LogCaptureHandler':
+        """Retorna el handler (para compatibilidad con algunos tests)."""
+        return self
+        
+    def clear(self) -> None:
+        """Limpia todos los registros capturados."""
+        self.records.clear()
+
+
+def _gather_extra_kwargs(test_func: Callable) -> Dict[str, Any]:
+    """Recolecta kwargs extra inyectados por el runner para la función dada.
+    
+    Filtra _EXTRA_KWARGS para incluir solo los argumentos que:
+    - Están en la signatura de la función
+    - No están marcados como protected_args (ej: @patch, @parametrize)
+    
+    Args:
+        test_func: Función de test a inyectar
+        
+    Returns:
+        Dict con los kwargs extra que deben inyectarse
+    """
+    import inspect
+    from typing import get_type_hints
+    
+    # Obtener parámetros de la función
+    sig = inspect.signature(test_func)
+    func_params = set(sig.parameters.keys())
+    
+    # Obtener argumentos protegidos de decoradores
+    protected_args = set()
+    if hasattr(test_func, 'pytestmark'):
+        markers = test_func.pytestmark
+        if not isinstance(markers, (list, tuple)):
+            markers = [markers]
+        
+        for marker in markers:
+            if hasattr(marker, 'name') and marker.name == 'parametrize':
+                if hasattr(marker, 'args') and marker.args:
+                    argnames = marker.args[0]
+                    if isinstance(argnames, str):
+                        protected_args.update(a.strip() for a in argnames.split(','))
+                    elif isinstance(argnames, (list, tuple)):
+                        protected_args.update(argnames)
+            elif hasattr(marker, 'name') and marker.name in ('patch', 'mock_patch'):
+                if hasattr(marker, 'kwargs') and marker.kwargs:
+                    target = marker.kwargs.get('target')
+                    if target and isinstance(target, str):
+                        protected_args.add(target)
+    
+    # Filtrar _EXTRA_KWARGS: solo params que están en fn y no en protected_args
+    extra_kwargs = {}
+    for name, value in _EXTRA_KWARGS.items():
+        if name in func_params and name not in protected_args:
+            extra_kwargs[name] = value
+    
+    return extra_kwargs
 
 
 class FixtureAdapter:
@@ -87,6 +186,37 @@ class FixtureInjector:
     def __init__(self, bridge: PytestBridge):
         self.bridge = bridge
         self.adapter = FixtureAdapter(bridge)
+        self._module_fixture_values: Dict[str, Any] = {}
+    
+    def _get_protected_args(self, test_func: Callable) -> set:
+        """Detecta argumentos ya cubiertos por decoradores de pytest/mock."""
+        protected = set()
+        
+        if not hasattr(test_func, 'pytestmark'):
+            return protected
+        
+        markers = test_func.pytestmark
+        if not isinstance(markers, (list, tuple)):
+            markers = [markers]
+        
+        for marker in markers:
+            # @pytest.mark.parametrize -> args[0] contiene nombres de parámetros
+            if hasattr(marker, 'name') and marker.name == 'parametrize':
+                if hasattr(marker, 'args') and marker.args:
+                    argnames = marker.args[0]
+                    if isinstance(argnames, str):
+                        protected.update(a.strip() for a in argnames.split(','))
+                    elif isinstance(argnames, (list, tuple)):
+                        protected.update(argnames)
+            
+            # @mock.patch / @patch -> kwargs 'target' o 'new' define el nombre del parámetro
+            elif hasattr(marker, 'name') and marker.name in ('patch', 'mock_patch'):
+                if hasattr(marker, 'kwargs') and marker.kwargs:
+                    target = marker.kwargs.get('target')
+                    if target and isinstance(target, str):
+                        protected.add(target)
+        
+        return protected
     
     def inject_fixtures(self, test_func: Callable, test_path: str) -> Callable:
         """Crea una versión de la función con fixtures inyectados."""
@@ -95,27 +225,34 @@ class FixtureInjector:
         sig = inspect.signature(test_func)
         params = list(sig.parameters.keys())
         
-        # Identificar cuáles son fixtures
+        # Obtener argumentos ya cubiertos por decoradores (@patch, @parametrize)
+        protected_args = self._get_protected_args(test_func)
+        
+        # Obtener kwargs extra inyectados por el runner
+        extra_kwargs = _gather_extra_kwargs(test_func)
+        
+        # Identificar cuáles son fixtures (excluyendo argumentos protegidos y extra_kwargs)
         fixture_params = []
         for param in params:
-            if self._is_fixture(param):
+            if param not in protected_args and param not in extra_kwargs and self._is_fixture(param):
                 fixture_params.append(param)
         
-        if not fixture_params:
-            # No hay fixtures que inyectar
+        if not fixture_params and not extra_kwargs:
+            # No hay nada que inyectar
             return test_func
         
-        # Crear wrapper que inyecta fixtures
+        # Crear wrapper que inyecta fixtures y extra_kwargs
         @wraps(test_func)
         def wrapper():
-            # Resolver todos los fixtures necesarios
-            kwargs = {}
+            # Resolver kwargs extra primero (del runner)
+            kwargs = dict(extra_kwargs)
             
-            # Resolver en orden de dependencias
+            # Resolver fixtures para argumentos restantes
             for fixture_name in fixture_params:
-                kwargs[fixture_name] = self._resolve_fixture(fixture_name)
+                if fixture_name not in kwargs:
+                    kwargs[fixture_name] = self._resolve_fixture(fixture_name)
             
-            # Llamar función original con fixtures inyectados
+            # Llamar función original con todo inyectado
             try:
                 result = test_func(**kwargs)
                 return result
@@ -128,6 +265,10 @@ class FixtureInjector:
     
     def _is_fixture(self, name: str) -> bool:
         """Verifica si un nombre corresponde a un fixture registrado."""
+        # caplog es un fixture built-in de pytest para capturar logs
+        if name == 'caplog':
+            return True
+        
         # Buscar en el fixture manager del bridge
         fixture_info = self.bridge.fixture_manager.get(name)
         if fixture_info:
@@ -147,7 +288,17 @@ class FixtureInjector:
     
     def _resolve_fixture(self, name: str) -> Any:
         """Resuelve un fixture por nombre."""
-        # Usar el bridge para obtener el valor
+        # caplog: crear LogCaptureHandler para capturar logs
+        if name == 'caplog':
+            handler = LogCaptureHandler()
+            logging.getLogger().addHandler(handler)
+            return handler
+        
+        # Primero buscar en valores del módulo (fixtures definidos en el test file)
+        if name in self._module_fixture_values:
+            return self._module_fixture_values[name]
+        
+        # Si no, usar el bridge para obtener el valor
         return self.bridge.get_fixture_value(name)
     
     def _cleanup_fixture(self, name: str):

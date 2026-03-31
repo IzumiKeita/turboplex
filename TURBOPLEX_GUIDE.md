@@ -226,6 +226,8 @@ your-project/
 │   │   └── test_models.py
 │   └── src/
 ├── .turboplex_cache/            # Auto-generated
+├── .tplex_report.json            # Latest report (symlink/copy to timestamped)
+├── .tplex_report_20250330_145322.json  # Historical reports (last 20 kept)
 └── turboplex_full_report.json   # Generated on test run
 ```
 
@@ -400,7 +402,7 @@ Output:
 | **Time per test** | ~6s | ~1.5s (4x faster) |
 | **Caching** | No | Yes (SHA-256) |
 | **Parallel Execution** | pytest-xdist | Native (Rayon) |
-| **M2M Report** | No | `.tplex_report.json` |
+| **M2M Report** | No | `.tplex_report.json` with history (last 20 reports) |
 | **AI Analysis** | No | `--analyze` command |
 | **Watch Mode** | pytest-watch | Native (`--watch`) |
 | **Collection Speed** | Slow (imports all) | Fast (AST parsing) |

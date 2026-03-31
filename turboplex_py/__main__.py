@@ -4,6 +4,14 @@
 # CRITICAL: Bootstrap SQLAlchemy patcher BEFORE any imports that might import SQLAlchemy
 # This ensures all DB operations are intercepted and made lazy
 import os
+
+# Initialize colorama for Windows ANSI color support
+try:
+    import colorama
+    colorama.init(autoreset=True)
+except ImportError:
+    pass  # colorama not installed, colors may not work on Windows
+
 if os.environ.get("TURBOTEST_SUBPROCESS") == "1":
     try:
         from turboplex_py.pytest_bootstrap import ensure_patchers

@@ -73,10 +73,16 @@ pub struct ExecutionConfig {
     pub cache_dir: Option<String>,
     #[serde(default = "default_true")]
     pub cache_enabled: bool,
+    #[serde(default = "default_worker_restart_interval")]
+    pub worker_restart_interval: usize,
 }
 
 fn default_timeout_cfg() -> u64 {
     30000
+}
+
+fn default_worker_restart_interval() -> usize {
+    50
 }
 
 fn default_true() -> bool {
@@ -101,6 +107,7 @@ impl Default for TurboConfig {
                 parallel_suites: true,
                 cache_dir: Some(".turbocache".to_string()),
                 cache_enabled: true,
+                worker_restart_interval: 50,
             },
             reporting: Some(ReportingConfig {
                 verbose: true,

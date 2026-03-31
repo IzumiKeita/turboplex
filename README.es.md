@@ -33,8 +33,12 @@
 | ⚡ **4x Velocidad** | Ejecución en paralelo con cacheo inteligente (12s → 3s) |
 | 🦀 **Núcleo Rust** | Análisis estático y gestión de memoria sin overhead |
 | 🤖 **Protocolo M2M** | Genera `.tplex_report.json` con errores procesables por IA |
-| � **Análisis IA** | Comando `--analyze` categoriza fallos para debugging a escala |
-| � **Watch Mode** | Recarga automática cuando guardas archivos `.py` |
+| 🧠 **Análisis IA** | Comando `--analyze` categoriza fallos para debugging a escala |
+| 👁️ **Watch Mode** | Recarga automática cuando guardas archivos `.py` |
+| 🎯 **Orquestación Inteligente** | Auto-detecta tier de hardware (móvil/desktop/servidor) |
+| 🔧 **Soporte Parametrize** | Compatibilidad total con `@pytest.mark.parametrize` y `@mock.patch` |
+| 📈 **De-duplicación** | Elimina errores duplicados para debugging más rápido |
+| 🗂️ **Rutas Normalizadas** | Rutas estandarizadas para compatibilidad cross-platform |
 
 <a id="es-instalacion"></a>
 ## Instalación
@@ -131,9 +135,11 @@ tpx --analyze
 ```
 
 **Archivos Generados:**
-- `turboplex_full_report.json` — Reporte JSONL completo con contexto de errores (traceback, locals, diff)
+- `turboplex_full_report.json` — Reporte JSONL completo con contexto de errores (traceback, locals, diff, parametrize call_spec)
 - Categorización automática: Errores de DB, fallos de Auth, issues de import, problemas de fixtures
 - Salida JSON lista para IA para pipelines de debugging automatizado
+- De-duplicación de errores con fingerprinting y conteo de ocurrencias
+- Normalización cross-platform de rutas (forward slashes para compatibilidad universal)
 
 ### Speedrun: Suite de Producción (~200 tests)
 
@@ -209,8 +215,8 @@ El caché se almacena en `.turboplex_cache/` y se invalida automáticamente cuan
         ">>> 41:     result = close_year(db, year)",
         "    42:     assert result.success"
       ]
-    }
-  ]
+  ],
+  "unique_failures": 1
 }
 ```
 
@@ -276,7 +282,7 @@ MIT License - Ver archivo `LICENSE`
 <a id="es-autores"></a>
 ## Autores
 
-**Versión TurboPlex:** 0.3.0 - **TurboPlex Team** - [@turbo plexus](https://github.com/turboplex)
+**Versión TurboPlex:** 0.3.1 - **TurboPlex Team** - [@turbo plexus](https://github.com/turboplex)
 
 ---
 

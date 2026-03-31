@@ -37,6 +37,7 @@ pub(crate) fn emit_error(opts: &OutputOptions, cwd: &Path, message: &str) -> Res
             "total": 0,
             "passed": 0,
             "failed": 0,
+            "skipped": 0,
             "duration_ms": 0,
         },
         "error": {
@@ -117,8 +118,13 @@ impl OutputState {
                 .then_with(|| a.1.test_name.cmp(&b.1.test_name))
         });
 
-        let passed = self.results.iter().filter(|(_, r)| r.passed).count();
-        let failed = self.results.len().saturating_sub(passed);
+        let skipped = self.results.iter().filter(|(_, r)| is_skipped(r)).count();
+        let failed = self.results.iter().filter(|(_, r)| !r.passed).count();
+        let passed = self
+            .results
+            .iter()
+            .filter(|(_, r)| r.passed && !is_skipped(r))
+            .count();
 
         // NUEVO: Generar reporte JSONL si se proporciona path
         if let Some(jsonl_path) = jsonl_path {
@@ -140,10 +146,17 @@ impl OutputState {
             pb.finish_and_clear();
         }
 
-        println!(
-            "Results: {} passed, {} failed ({}ms)",
-            passed, failed, duration_ms
-        );
+        if skipped > 0 {
+            println!(
+                "Results: {} passed, {} failed, {} skipped ({}ms)",
+                passed, failed, skipped, duration_ms
+            );
+        } else {
+            println!(
+                "Results: {} passed, {} failed ({}ms)",
+                passed, failed, duration_ms
+            );
+        }
         Ok((passed, failed))
     }
 
@@ -171,7 +184,10 @@ fn format_label(path: &Path, test_name: &str) -> String {
 
 fn format_result_line(path: &Path, result: &TestResult) -> String {
     let label = format_label(path, &result.test_name);
-    if result.passed {
+    if is_skipped(result) {
+        let reason = skip_reason(result).unwrap_or_else(|| "skipped".to_string());
+        format!("SKIP {} ({}ms) {}", label, result.duration_ms, reason)
+    } else if result.passed {
         format!("PASS {} ({}ms)", label, result.duration_ms)
     } else {
         let err = result.error.as_deref().unwrap_or("failed");
@@ -185,6 +201,24 @@ fn format_result_line(path: &Path, result: &TestResult) -> String {
     }
 }
 
+fn is_skipped(result: &TestResult) -> bool {
+    result
+        .enriched_data
+        .as_ref()
+        .and_then(|v| v.get("skipped"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+fn skip_reason(result: &TestResult) -> Option<String> {
+    result
+        .enriched_data
+        .as_ref()
+        .and_then(|v| v.get("skip_reason"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
 fn build_run_payload(
     cwd: &Path,
     results: &[(PathBuf, TestResult)],
@@ -193,11 +227,15 @@ fn build_run_payload(
 ) -> serde_json::Value {
     let mut passed = 0usize;
     let mut failed = 0usize;
+    let mut skipped = 0usize;
 
     let results_json: Vec<serde_json::Value> = results
         .iter()
         .map(|(p, r)| {
-            if r.passed {
+            let is_sk = is_skipped(r);
+            if is_sk {
+                skipped += 1;
+            } else if r.passed {
                 passed += 1;
             } else {
                 failed += 1;
@@ -211,6 +249,8 @@ fn build_run_payload(
                 "path": rel,
                 "test": r.test_name,
                 "passed": r.passed,
+                "skipped": is_sk,
+                "skip_reason": skip_reason(r),
                 "cached": r.cached,
                 "duration_ms": r.duration_ms,
                 "error": r.error,
@@ -232,6 +272,7 @@ fn build_run_payload(
             "total": results_json.len(),
             "passed": passed,
             "failed": failed,
+            "skipped": skipped,
             "duration_ms": duration_ms,
         },
         "artifacts": {

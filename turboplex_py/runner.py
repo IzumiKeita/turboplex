@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import importlib.util
 import inspect
 import json
@@ -12,7 +13,10 @@ import re
 import sys
 import time
 import traceback
-from typing import Any, Callable
+from typing import Any, Callable, Optional
+
+# Track last module for GC optimization
+_last_module_path: Optional[str] = None
 
 # Configure logging to stderr to keep stdout clean for JSON
 for h in logging.root.handlers[:]:
@@ -31,7 +35,24 @@ logging.getLogger("asyncio").setLevel(logging.CRITICAL)
 
 from .fixtures import build_kwargs_for_callable
 from .markers import skip_check
-from .pytest_integration import get_compat_mode, has_pytest_fixtures
+from .pytest_integration import get_compat_mode
+
+_PYTEST_SKIP_EXCEPTION: Any = None
+_PYTEST_SKIP_EXCEPTION_READY = False
+
+
+def _get_pytest_skip_exception() -> Any:
+    global _PYTEST_SKIP_EXCEPTION, _PYTEST_SKIP_EXCEPTION_READY
+    if _PYTEST_SKIP_EXCEPTION_READY:
+        return _PYTEST_SKIP_EXCEPTION
+    _PYTEST_SKIP_EXCEPTION_READY = True
+    try:
+        import pytest
+
+        _PYTEST_SKIP_EXCEPTION = getattr(getattr(pytest, "skip", None), "Exception", None)
+    except Exception:
+        _PYTEST_SKIP_EXCEPTION = None
+    return _PYTEST_SKIP_EXCEPTION
 
 
 def _invoke_function_with_pytest_bridge(mod, fn, parametrize_index=None):
@@ -297,7 +318,8 @@ def _emit_enhanced(
     test_path: str,
     test_qual: str,
     error: Exception | None = None,
-    fixtures_used: list[str] | None = None
+    fixtures_used: list[str] | None = None,
+    parametrize_info: dict | None = None
 ) -> dict[str, Any]:
     """Emite JSON enriquecido con ventana de contexto."""
     
@@ -307,7 +329,8 @@ def _emit_enhanced(
         "test_info": {
             "path": test_path,
             "qualname": test_qual,
-            "lineno": _get_test_lineno(test_path, test_qual)
+            "lineno": _get_test_lineno(test_path, test_qual),
+            "parametrize": parametrize_info
         }
     }
     
@@ -388,48 +411,94 @@ def _load_module(path: pathlib.Path):
     return mod
 
 
-def _get_parametrize_kwargs(fn: Callable[..., Any], parametrize_index: int) -> dict[str, Any]:
-    """Extract parameters from @pytest.mark.parametrize for a given index."""
-    parametrize_marker = None
-    if hasattr(fn, "pytestmark"):
-        for mark in fn.pytestmark:
-            if hasattr(mark, "name") and mark.name == "parametrize":
-                parametrize_marker = mark
-                break
-            # Handle list of markers
-            if isinstance(mark, list):
-                for m in mark:
-                    if hasattr(m, "name") and m.name == "parametrize":
-                        parametrize_marker = m
-                        break
+def _get_parametrize_info(fn: Callable[..., Any], parametrize_index: int, test_path: str = None, qualname: str = None) -> dict | None:
+    """Extrae información completa de parametrize incluyendo call_spec."""
+    if not hasattr(fn, 'pytestmark'):
+        # Fallback: intentar leer desde cache si no hay markers
+        if test_path and qualname:
+            return _get_parametrize_from_cache(test_path, qualname, parametrize_index)
+        return None
     
-    if not parametrize_marker:
-        return {}
+    markers = fn.pytestmark
+    if not isinstance(markers, (list, tuple)):
+        markers = [markers]
     
-    try:
-        if hasattr(parametrize_marker, "args"):
-            args = parametrize_marker.args
+    for marker in markers:
+        if hasattr(marker, 'name') and marker.name == 'parametrize':
+            args = getattr(marker, 'args', [])
             if len(args) >= 2:
                 arg_names = args[0]
                 test_values = args[1]
                 
                 if isinstance(arg_names, str):
-                    arg_names = [a.strip() for a in arg_names.split(",")]
+                    arg_names = [a.strip() for a in arg_names.split(',')]
                 
-                # Get the specific set of values for this test
-                values = test_values[parametrize_index]
-                if not isinstance(values, (list, tuple)):
-                    values = (values,)
-                
-                # Build kwargs from parameters
-                kwargs = {}
-                for i, arg_name in enumerate(arg_names):
-                    if i < len(values):
-                        kwargs[arg_name] = values[i]
-                return kwargs
-    except Exception as e:
-        raise RuntimeError(f"Could not resolve parametrize for index {parametrize_index}: {e}")
+                # Obtener valores para este índice
+                if parametrize_index < len(test_values):
+                    values = test_values[parametrize_index]
+                    if not isinstance(values, (list, tuple)):
+                        values = (values,)
+                    
+                    # Construir call_spec (mapeo nombre -> valor)
+                    call_spec = {}
+                    for i, arg_name in enumerate(arg_names):
+                        if i < len(values):
+                            # Serializar valor para JSON
+                            val = values[i]
+                            if isinstance(val, (int, float, bool, str, type(None))):
+                                call_spec[arg_name] = val
+                            else:
+                                call_spec[arg_name] = repr(val)
+                    
+                    kwargs = {'arg_names': arg_names}
+                    if hasattr(marker, 'kwargs') and marker.kwargs:
+                        ids = marker.kwargs.get('ids', [])
+                        if ids and parametrize_index < len(ids):
+                            kwargs['id'] = ids[parametrize_index]
+                    
+                    return {
+                        "index": parametrize_index,
+                        "call_spec": call_spec,
+                        **kwargs
+                    }
+    return None
+
+
+def _get_parametrize_from_cache(test_path: str, qualname: str, parametrize_index: int) -> dict | None:
+    """Fallback: recupera información de parametrize desde el cache de TurboPlex.
     
+    Lee .turboplex_cache/collected_tests.json cuando los markers no están disponibles.
+    """
+    cache_path = pathlib.Path('.turboplex_cache/collected_tests.json')
+    if not cache_path.exists():
+        return None
+    
+    try:
+        data = json.loads(cache_path.read_text(encoding='utf-8'))
+        tests = data.get('tests', [])
+        
+        # Buscar test que coincida con path y qualname
+        for test in tests:
+            if test.get('path') == test_path and test.get('qualname') == qualname:
+                parametrize_data = test.get('parametrize')
+                if parametrize_data and parametrize_data.get('index') == parametrize_index:
+                    return {
+                        'index': parametrize_index,
+                        'call_spec': parametrize_data.get('call_spec', {}),
+                        'arg_names': parametrize_data.get('arg_names', []),
+                    }
+    except Exception:
+        pass  # Cache no disponible o corrupto
+    
+    return None
+
+
+# Alias para compatibilidad
+def _get_parametrize_kwargs(fn: Callable[..., Any], parametrize_index: int) -> dict[str, Any]:
+    """Extract parameters from @pytest.mark.parametrize for a given index."""
+    info = _get_parametrize_info(fn, parametrize_index)
+    if info:
+        return info.get('call_spec', {})
     return {}
 
 
@@ -471,13 +540,79 @@ def _invoke_function(mod, fn: Callable[..., Any], parametrize_index: int = None)
     fn(**kwargs)
 
 
+def _setup_database_env():
+    """Configura variables de entorno para conexión DB desde config o env existentes."""
+    import os
+    import re
+
+    # Check de seguridad: si DATABASE_URL no apunta a DB de test, forzar override
+    test_db_pattern = os.environ.get('TEST_DB_PATTERN', '.*test.*')
+    if 'DATABASE_URL' in os.environ:
+        current_url = os.environ['DATABASE_URL']
+        # Si no coincide con el patrón de test y existe _TEST_DATABASE_URL, forzar override
+        if not re.search(test_db_pattern, current_url, re.IGNORECASE):
+            if '_TEST_DATABASE_URL' in os.environ:
+                os.environ['DATABASE_URL'] = os.environ['_TEST_DATABASE_URL']
+        return
+
+    # Configurar desde variables individuales con defaults
+    defaults = {
+        'DB_HOST': 'localhost',
+        'DB_PORT': '5432',
+        'DB_USER': 'postgres',
+        'DB_PASSWORD': '',
+        'DB_NAME': 'test_db'
+    }
+    for key, default_val in defaults.items():
+        if key not in os.environ:
+            os.environ[key] = default_val
+
+
+def _preload_pos_retail_models():
+    """Pre-carga modelos de pos_retail si están disponibles."""
+    try:
+        import pos_retail.models
+        # Forzar import de modelos comunes para que estén en memoria
+        from pos_retail.models import User, Empresa, Cliente
+    except ImportError:
+        pass  # pos_retail no disponible, continuar sin pre-carga
+
+
+def _bootstrap_test_environment():
+    """Bootstrap completo: DB env + pre-import de modelos."""
+    _setup_database_env()
+    _preload_pos_retail_models()
+    # Auto-cargar conftest.py desde tests/ si existe
+    try:
+        tests_dir = os.path.join(os.getcwd(), "tests")
+        conftest_path = os.path.join(tests_dir, "conftest.py")
+        if os.path.isfile(conftest_path):
+            if tests_dir not in sys.path:
+                sys.path.insert(0, tests_dir)
+            import conftest as _tpx_conftest  # noqa: F401
+    except Exception:
+        pass
+
+
 def run_test(path_str: str, qual: str) -> dict[str, Any]:
+    global _last_module_path
+    
+    # Bootstrap: configurar DB env y pre-importar modelos antes de cargar tests
+    _bootstrap_test_environment()
+    
     path = pathlib.Path(path_str)
     if not path.is_file():
         return _emit_enhanced(False, 0, path_str, qual, error=Exception(f"not a file: {path_str}"))
-
+    
+    # GC agresivo: ejecutar gc.collect() al cambiar de módulo
+    current_module = str(path.resolve())
+    if _last_module_path is not None and _last_module_path != current_module:
+        gc.collect()  # Liberar memoria del módulo anterior
+    _last_module_path = current_module
+    
     # Check for parametrize index in qualname (e.g., "test_func[0]")
     parametrize_index = None
+    original_qual = qual
     if "[" in qual and qual.endswith("]"):
         base_qual, idx_str = qual.rsplit("[", 1)
         try:
@@ -485,7 +620,17 @@ def run_test(path_str: str, qual: str) -> dict[str, Any]:
             qual = base_qual
         except ValueError:
             pass
-
+    
+    # RSS monitoring: medir memoria al inicio
+    rss_start: Optional[int] = None
+    rss_end: Optional[int] = None
+    try:
+        import psutil
+        process = psutil.Process(os.getpid())
+        rss_start = process.memory_info().rss
+    except Exception:
+        pass  # psutil no disponible, continuar sin monitoreo
+    
     t0 = time.perf_counter()
     try:
         mod = _load_module(path.resolve())
@@ -493,7 +638,17 @@ def run_test(path_str: str, qual: str) -> dict[str, Any]:
         dt = int((time.perf_counter() - t0) * 1000)
         traceback.print_exc(file=sys.stderr)
         return _emit_enhanced(False, dt, path_str, qual, error=e)
-
+    
+    # Obtener parametrize_info antes de ejecutar para incluir en el reporte
+    parametrize_info = None
+    try:
+        if "::" not in qual:
+            fn = getattr(mod, qual)
+            if parametrize_index is not None and inspect.isfunction(fn):
+                parametrize_info = _get_parametrize_info(fn, parametrize_index, str(path), qual)
+    except Exception:
+        pass
+    
     try:
         if "::" in qual:
             cname, mname = qual.split("::", 1)
@@ -514,13 +669,53 @@ def run_test(path_str: str, qual: str) -> dict[str, Any]:
         if sk.reason:
             payload["skip_reason"] = sk.reason
         return payload
-    except Exception as e:
+    except BaseException as e:
+        skip_exc = _get_pytest_skip_exception()
+        if skip_exc is not None and isinstance(e, skip_exc):
+            dt = int((time.perf_counter() - t0) * 1000)
+            payload = {"passed": True, "duration_ms": dt, "error": None, "skipped": True}
+            reason = getattr(e, "msg", None)
+            if not reason:
+                reason = getattr(e, "reason", None)
+            if not reason and getattr(e, "args", None):
+                try:
+                    reason = e.args[0]
+                except Exception:
+                    reason = None
+            if reason:
+                payload["skip_reason"] = str(reason)
+            return payload
+        if e.__class__.__name__ == "Skipped" and e.__class__.__module__ == "_pytest.outcomes":
+            dt = int((time.perf_counter() - t0) * 1000)
+            payload = {"passed": True, "duration_ms": dt, "error": None, "skipped": True}
+            reason = getattr(e, "msg", None)
+            if reason:
+                payload["skip_reason"] = str(reason)
+            return payload
+        if not isinstance(e, Exception):
+            raise
         dt = int((time.perf_counter() - t0) * 1000)
         traceback.print_exc(file=sys.stderr)
-        return _emit_enhanced(False, dt, path_str, qual, error=e)
-
+        return _emit_enhanced(False, dt, path_str, original_qual, error=e, parametrize_info=parametrize_info)
+    
     dt = int((time.perf_counter() - t0) * 1000)
-    return _emit_enhanced(True, dt, path_str, qual)
+    result = _emit_enhanced(True, dt, path_str, original_qual, parametrize_info=parametrize_info)
+    
+    # RSS monitoring: medir memoria al final
+    try:
+        import psutil
+        process = psutil.Process(os.getpid())
+        rss_end = process.memory_info().rss
+    except Exception:
+        pass
+    
+    # Agregar datos RSS al resultado si están disponibles
+    if rss_start is not None and rss_end is not None:
+        result["rss_start_bytes"] = rss_start
+        result["rss_end_bytes"] = rss_end
+        result["rss_delta_bytes"] = rss_end - rss_start
+    
+    return result
 
 
 def run_main(path_str: str, qual: str, out_json: str | None = None) -> None:

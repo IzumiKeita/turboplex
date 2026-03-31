@@ -1,4 +1,4 @@
-# TurboPlex (tpx) — The Test Orchestration Engine for the AI Era
+# TurboPlex (tpx) — Fast Test Orchestration for Python (Rust core)
 
 **English** | [Español](README.es.md)
 
@@ -8,110 +8,190 @@
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License">
 </p>
 
+TurboPlex is a hybrid **Rust + Python** test runner that accelerates large suites with:
+- fast test discovery
+- parallel execution
+- SHA-based caching
+- structured JSON reports for IDEs and AI agents
+
+## TL;DR
+
+```bash
+pip install turboplex
+tpx --path tests/
+```
+
+## Contents
+
+- [Why TurboPlex](#why-turboplex)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Modes](#modes)
+- [Windows / venv (TPX_PYTHON_EXE)](#windows--venv-tpx_python_exe)
+- [Skipping tests (pytest.skip)](#skipping-tests-pytestskip)
+- [Reports](#reports)
+- [Cache](#cache)
+- [MCP server (IDE integration)](#mcp-server-ide-integration)
+- [Configuration](#configuration)
+- [Benchmarks](#benchmarks)
+- [Troubleshooting](#troubleshooting)
+- [Development](#development)
+- [License](#license)
+
 ## Why TurboPlex?
 
-> **4x faster than Pytest** for test execution. The orchestration engine built for the AI era.
+TurboPlex focuses on making “run tests” fast and machine-consumable:
 
-### Value Proposition
-
-| Feature | Description |
-|----------------|-------------|
-| ⚡ **4x Speed** | Parallel execution with smart caching (12s → 3s) |
-| 🦀 **Rust Core** | Static analysis and memory management with minimal overhead |
-| 🤖 **M2M Protocol** | Generates `.tplex_report.json` with AI-actionable errors |
-| � **AI Analysis** | `--analyze` command categorizes failures for debugging at scale |
-| � **Watch Mode** | Auto-reload when you save `.py` files |
+| Feature | What you get |
+|---|---|
+| Fast discovery | AST-based collection avoids heavy imports where possible |
+| Parallel execution | Isolated Python subprocess per test (or pytest in compat mode) |
+| Smart caching | Cache pass results keyed by file hash + runtime fingerprint |
+| Structured output | Stable JSON schema for tooling, MCP, and analysis |
+| Watch mode | Rerun suite on file save |
 
 ## Installation
 
-```bash
-# Install from PyPI
-pip install turboplex
+From PyPI:
 
-# Verify the installation
+```bash
+pip install turboplex
 tpx --help
 ```
 
+From source (dev):
+
 ```bash
-# Clone the repository (dev)
+git clone https://github.com/IzumiKeita/turboplex.git
 cd turboplex
-
-# Install in development mode
 pip install -e .
-
-# Verify the installation
 tpx --help
 ```
 
 ## Quick Start
 
-### Basic Execution
+Run a directory:
 
 ```bash
-# Single test
-tpx --path tests/test_simple.py
+tpx --path tests/
+```
 
-# Multiple directories
+Run multiple paths:
+
+```bash
 tpx --path tests/ --path tests/integration/
+```
 
-# Auto-discover tests
+Auto-discover:
+
+```bash
 tpx
 ```
 
-### Watch Mode (TDD Development)
+Watch mode:
 
 ```bash
-# Run and watch changes in real time
 tpx --watch --path tests/
 ```
 
-### Pytest Compatibility Mode (`--compat`)
+## Modes
 
-Use this when your suite relies on complex pytest fixtures (`conftest.py`, `client`, `db`, etc.).
+### Native mode (default)
+
+Best for suites where:
+- imports can be expensive (DB bootstraps, migrations, Pydantic config)
+- you want faster iteration with caching and structured results
+
+### Pytest compatibility mode (`--compat`)
+
+Use this when you need full pytest semantics/plugins:
 
 ```bash
 tpx --compat --path tests/
 ```
 
-#### Light Collect Mode (`--light`)
+### Light collect (`--light`)
 
-For projects with heavy `conftest.py` initialization (e.g., database migrations, schema creation), use `--light` to skip conftest loading during test discovery. This can reduce discovery time from **minutes to seconds**.
+Skips `conftest.py` import during discovery. Useful when `conftest.py` performs heavy work on import.
 
 ```bash
-# Fast discovery for projects with heavy conftest.py
 tpx --compat --light
-
-# Or set the environment variable
-export TPX_MCP_LIGHT_COLLECT=1  # Linux/Mac
-set TPX_MCP_LIGHT_COLLECT=1     # Windows
-tpx --compat
 ```
 
-**When to use:**
-- Your `conftest.py` initializes databases or runs migrations on import
-- Test discovery takes more than 10 seconds
-- You're using TurboPlex MCP with an IDE (Windsurf, Cursor, etc.)
+Environment alternative:
 
-### MCP Server (IDE Integration)
+```bash
+export TPX_MCP_LIGHT_COLLECT=1  # Linux/Mac
+set TPX_MCP_LIGHT_COLLECT=1     # Windows
+```
+
+## Windows / venv (TPX_PYTHON_EXE)
+
+TurboPlex resolves the Python interpreter using this precedence:
+1. `TPX_PYTHON_EXE` (if set and path exists)
+2. `python.interpreter` from `turbo_config.toml` (if set and path exists)
+3. Auto-detected `.venv/venv/.env/env` near the project
+4. System `python`
+
+Example (force a secondary venv):
+
+```powershell
+$env:TPX_PYTHON_EXE = (Resolve-Path .\.venv_alt\Scripts\python.exe).Path
+tpx --path tests/
+```
+
+CLI prints a confirmation line:
+- `Using TPX_PYTHON_EXE: C:\path\to\.venv_alt\Scripts\python.exe`
+
+## Skipping tests (pytest.skip)
+
+In native mode, `pytest.skip(...)` is recognized and reported as a skip (not a failure):
+- CLI prints `SKIP ...` lines
+- summary includes `skipped`
+- JSON includes `skipped: true` and `skip_reason`
+
+Example summary:
+
+```
+Results: 120 passed, 0 failed, 5 skipped (24000ms)
+```
+
+## Reports
+
+TurboPlex generates machine-readable artifacts:
+
+- `.tplex_report.json` and timestamped `.tplex_report_%Y%m%d_%H%M%S.json`
+- `turboplex_full_report.json` (JSONL) with richer error context for large suites
+
+## Cache
+
+Cache lives in `.turboplex_cache/` and is invalidated when:
+- test files change (hash)
+- runtime fingerprint changes (Python version, deps hash, PYTHONPATH, flags)
+
+## MCP server (IDE integration)
+
+Start the MCP server:
 
 ```bash
 tpx mcp
 ```
 
 Notes:
-- For robustness, TurboPlex isolates tool payloads in JSON files (`--out-json`) to prevent stdout pollution.
-- Subprocesses enforce UTF-8 (`PYTHONUTF8=1`, `PYTHONIOENCODING=utf-8`, `PYTHONUNBUFFERED=1`) to avoid Windows encoding issues.
-- Timeouts are structured and configurable via environment variables:
-  - `TPX_PYTHON_EXE` - Force specific Python interpreter (useful for venvs on Windows).
-  - `TPX_MCP_LIGHT_COLLECT=1` - Skip conftest.py during discovery (for projects with heavy DB initialization).
-  - `TPX_MCP_DEBUG=1` - Enable debug tracing to stderr (shows commands, Python used, etc.).
-  - `TPX_MCP_STDOUT_MODE` - `redirect` (default) or `failfast` for JSON-RPC guarding.
-  - `TPX_MCP_TURBOPLEX_COLLECT_TIMEOUT_S` (default 120)
-  - `TPX_MCP_TURBOPLEX_RUN_TIMEOUT_S` (default 60)
-  - `TPX_MCP_PYTEST_COLLECT_TIMEOUT_S` or `TPX_PYTEST_COLLECT_TIMEOUT_S` (default 120)
-  - `TPX_MCP_PYTEST_RUN_TIMEOUT_S` or `TPX_PYTEST_RUN_TIMEOUT_S` (default 60)
+- `--out-json` avoids stdout pollution for JSON-RPC toolchains.
+- subprocesses force UTF-8 (`PYTHONUTF8=1`, `PYTHONIOENCODING=utf-8`, `PYTHONUNBUFFERED=1`).
 
-**Example MCP Configuration (Windsurf/Cursor):**
+Common MCP env vars:
+- `TPX_PYTHON_EXE`
+- `TPX_MCP_LIGHT_COLLECT=1`
+- `TPX_MCP_DEBUG=1`
+- `TPX_MCP_STDOUT_MODE=redirect|failfast`
+- `TPX_MCP_TURBOPLEX_COLLECT_TIMEOUT_S` (default 120)
+- `TPX_MCP_TURBOPLEX_RUN_TIMEOUT_S` (default 60)
+- `TPX_MCP_PYTEST_COLLECT_TIMEOUT_S` / `TPX_PYTEST_COLLECT_TIMEOUT_S` (default 120)
+- `TPX_MCP_PYTEST_RUN_TIMEOUT_S` / `TPX_PYTEST_RUN_TIMEOUT_S` (default 60)
+
+Example MCP config:
 
 ```json
 {
@@ -129,103 +209,9 @@ Notes:
 }
 ```
 
-Tools exposed over MCP:
-- `ping`
-- `turboplex_version`
-- `discover(paths=None, compat=False)`
-- `run(selection, compat=False, max_workers=None)`
-- `get_report(path=None)`
-
-### Integration with AI Agents
-
-```bash
-# INSTRUCTION FOR YOUR AI AGENT:
-# If you detect a .tplex_report.json file in the project,
-# read it immediately and propose an automatic fix.
-
-# The file contains:
-# - Exact error
-# - Failure line
-# - Code context (5 lines before and after)
-```
-
-### AI-Driven Test Analysis (`--analyze`)
-
-For large test suites with hundreds of failures, TurboPlex provides automatic error categorization and actionable recommendations. Tested on real-world production suites (~200 tests, ~3.2MB of failure data).
-
-```bash
-# Run tests with full JSONL report generation
-tpx --path tests/
-
-# Analyze the generated report
-tpx --analyze
-```
-
-**Example Output:**
-```
-════════════════════════════════════════════════════════════
-          TurboPlex Analysis Report
-════════════════════════════════════════════════════════════
-
-📊 Summary
-   Total:  199
-   Passed: 35
-   Failed: 164
-   Rate:   17.6%
-
-🚨 Critical Issues
-   • 45 tests have database connectivity issues
-   • 12 tests have import errors - dependencies may be missing
-
-📋 Error Categories
-   [45] AuthError: Expected 200 got 403 - Authorization failures
-   [32] DatabaseError: Unique constraint violation
-   [28] FixtureError: Fixture setup failed
-   [20] AssertionError: Creation status mismatch
-   [15] ImportError: Missing module
-
-💡 Top Recommendations
-   1. Priority 45: Check authentication fixtures - ensure tests have valid credentials
-   2. Priority 32: Implement database cleanup between tests or use unique identifiers
-   3. Priority 28: Review fixture dependencies and ensure proper setup/teardown
-```
-
-**Generated Files:**
-- `turboplex_full_report.json` — Complete JSONL report with full error context (traceback, locals, diff)
-- Automatic categorization: Database errors, Auth failures, Import issues, Fixture problems
-- AI-ready JSON output for automated debugging pipelines
-
-### Speedrun: Production Suite (~200 tests)
-
-| Tool | Time | per test |
-|------|------|----------|
-| **pytest** | ~340s | ~1.7s |
-| **tpx (cold)** | ~180s | ~0.9s |
-| **tpx (cached)** | **~25s** | **~0.13s** |
-
-```
-pytest (cold):  ████████████████████████████████████████ 340s
-tpx (cold):     ██████████████████████ 180s (2x faster)
-tpx (cached):   ███ 25s (14x faster, 82% cache hit)
-```
-
-🖥️ **Tested on:**
-
-- CPU: Ryzen 7 5700X3D (8C/16T)
-- RAM: 16GB DDR4 @ 3600MHz
-- Storage: Crucial P3 NVMe Gen3 (1TB)
-
-### Per-Test Comparison
-
-| Metric | pytest | tpx |
-|---------|--------|-----|
-| Time per test | ~6s | ~1.5s |
-| Caching | No | Yes (SHA-256) |
-| M2M Report | No | Yes (.tplex_report.json) |
-
 ## Configuration
 
-### `turbo_config.toml` File
+`turbo_config.toml` example:
 
 ```toml
 [execution]
@@ -241,99 +227,37 @@ test_paths = ["tests"]
 project_path = "."
 ```
 
-### Cache
+## Benchmarks
 
-The cache is stored in `.turboplex_cache/` and is automatically invalidated when test files change (SHA-256 hash) or when the runtime fingerprint changes (Python version, dependency lock hash, PYTHONPATH, execution flags).
+Production suite (~200 tests):
 
-## API for AI Agents
+| Tool | Time | per test |
+|---|---:|---:|
+| pytest | ~340s | ~1.7s |
+| tpx (cold) | ~180s | ~0.9s |
+| tpx (cached) | ~25s | ~0.13s |
 
-### `.tplex_report.json` Format
+## Troubleshooting
 
-```json
-{
-  "timestamp": "2026-03-28 14:17:49",
-  "total_tests": 1,
-  "failed_count": 1,
-  "failures": [
-    {
-      "test": "test_fiscal_year_close_logic",
-      "file": "tests/test_accounting_close.py",
-      "line": 42,
-      "error": "parameter 'db' has no @fixture and no default",
-      "context": [
-        "    38: def test_fiscal_year_close_logic(db):",
-        "    39:     # Arrange",
-        "    40:     year = 2024",
-        ">>> 41:     result = close_year(db, year)",
-        "    42:     assert result.success"
-      ]
-    }
-  ]
-}
+Common issues:
+
+- “Fixture not found” in native mode
+  - Use `--compat` if you rely on complex pytest fixtures/plugins
+- Slow discovery
+  - Use `--light` (or `TPX_MCP_LIGHT_COLLECT=1`) to avoid heavy conftest imports
+- “ModuleNotFoundError” during run
+  - Ensure your project is on `PYTHONPATH` or configured via `turbo_config.toml`
+
+## Development
+
+Build wheels with maturin:
+
+```bash
+python -m pip install maturin
+python -m maturin build --release -o dist
+python -m maturin sdist -o dist
 ```
-
-## Commands
-
-| Command | Description |
-|---------|-------------|
-| `tpx` | Auto-discover and run tests |
-| `tpx --path ./tests` | Run tests in a directory |
-| `tpx --watch` | Watch mode with auto-reload |
-| `tpx --compat` | Delegate discovery/execution to pytest for fixture-heavy suites |
-| `tpx --compat --light` | Fast discovery mode (skips conftest.py loading) |
-| `tpx --analyze` | Analyze test failures and categorize errors (requires `turboplex_full_report.json`) |
-| `tpx mcp` | Start the MCP server over stdio for IDE integration |
-| `tpx --help` | Show help |
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────┐
-│                    tpx (Rust)                        │
-├─────────────────────────────────────────────────────┤
-│  • Test discovery                                   │
-│  • SHA-256 caching                                  │
-│  • Parallel execution (Rayon)                       │
-│  • Watch mode (notify)                              │
-│  • M2M report (.tplex_report.json)                  │
-│  • JSONL reports (turboplex_full_report.json)       │
-│  • AI Analysis (--analyze)                          │
-└─────────────────────────────────────────────────────┘
-                          │
-                          ▼
-┌─────────────────────────────────────────────────────┐
-│              turboplex_py (Python)                  │
-├─────────────────────────────────────────────────────┤
-│  • collector.py - Test discovery                    │
-│  • runner.py - Test runner                          │
-│  • fixtures.py - @fixture system                    │
-│  • markers.py - skip, skipif                        │
-└─────────────────────────────────────────────────────┘
-```
-
-## Files Excluded from the Repository (.gitignore)
-
-This project ignores generated files and local configuration to keep the repository lightweight, reproducible, and free of sensitive data.
-
-- Build artifacts and caches (e.g., `target/`, `**/target/`, `.cache/`)
-- Temporary files and logs (`*.tmp`, `*.log`, `*.swp`)
-- Local IDE/OS configuration (e.g., `.vscode/`, `.idea/`, `Thumbs.db`, `.DS_Store`)
-- Python local environments and metadata (e.g., `.venv/`, `__pycache__/`, `*.egg-info/`)
-- Environment files with secrets or local configuration (`.env`, `.env.*`)
-- Web tooling dependencies and outputs if applicable (`node_modules/`, `dist/`, `build/`)
-- TurboPlex-generated caches and reports (`.turboplex_cache/`, `.tplex_report.json`, `turboplex_full_report.json`)
 
 ## License
 
-MIT License - See `LICENSE`
-
-## Authors
-Keita_Izumi
-
-**TurboPlex Version:** 0.3.0 - [@turbo plexus](https://github.com/IzumiKeita/turboplex)
-
----
-
-<p align="center">
-  🚀 <em>The future of testing is here</em>
-</p>
+MIT License — see `LICENSE`

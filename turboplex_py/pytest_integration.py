@@ -210,60 +210,22 @@ def detect_conftest_paths(test_paths: List[str]) -> Dict[str, str]:
     return mapping
 
 
-def has_pytest_fixtures(test_path: str) -> bool:
-    """Verifica si un archivo de test usa fixtures de pytest."""
-    try:
-        with open(test_path, 'r', encoding='utf-8') as f:
-            source = f.read()
-        
-        # Buscar patrones típicos de fixtures de pytest
-        indicators = [
-            "def test_",  # Funciones de test
-            "(db)",       # Parámetro db común
-            "(client)",   # Parámetro client común
-            "(session)",  # Parámetro session
-            "(request)", # Fixture request de pytest
-        ]
-        
-        # Buscar si hay funciones con parámetros que podrían ser fixtures
-        import ast
-        try:
-            tree = ast.parse(source)
-        except SyntaxError:
-            return False
-        
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef):
-                if node.name.startswith("test_"):
-                    # Tiene parámetros además de self/cls?
-                    args = [arg.arg for arg in node.args.args]
-                    non_self_args = [a for a in args if a not in ('self', 'cls')]
-                    if non_self_args:
-                        return True
-        
-        return False
-        
-    except Exception as e:
-        logger.debug(f"Error verificando fixtures en {test_path}: {e}")
-        return False
-
-
 # Cache de modos compatibilidad
 _compat_modes: Dict[str, PytestCompatMode] = {}
 
 
 def get_compat_mode(test_path: str) -> Optional[PytestCompatMode]:
-    """Obtiene (o crea) un modo compatibilidad para un test."""
+    """Obtiene (o crea) un modo compatibilidad para un test.
+    
+    El bridge se activa siempre por defecto para todos los tests,
+    sin verificación previa de fixtures de pytest.
+    """
     global _compat_modes
     
     if test_path in _compat_modes:
         return _compat_modes[test_path]
     
-    # Verificar si tiene fixtures de pytest
-    if not has_pytest_fixtures(test_path):
-        return None
-    
-    # Crear nuevo modo
+    # Crear nuevo modo (bridge activo siempre)
     mode = PytestCompatMode(test_path)
     if mode.initialize():
         _compat_modes[test_path] = mode

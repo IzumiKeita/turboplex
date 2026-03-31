@@ -247,14 +247,40 @@ pub(crate) fn build_runtime_python_env(compat: bool, extra_flags: &str) -> Runti
         .unwrap_or_default();
 
     let py_cfg = python_config_effective(&config);
-    
-    // Try to find venv Python first
+
+    // Jerarquía de intérpretes: Variable > Config > .venv Autodetect > default
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let venv_python = find_venv_python(&cwd);
     
-    let interpreter = venv_python.or_else(|| {
-        py_cfg.interpreter.clone()
-    }).unwrap_or_else(|| "python".to_string());
+    // 1. Primero: TPX_PYTHON_EXE (variable de entorno)
+    let interpreter = std::env::var("TPX_PYTHON_EXE")
+        .and_then(|path| {
+            if std::path::Path::new(&path).exists() {
+                eprintln!("Using TPX_PYTHON_EXE: {}", path);
+                Ok(path)
+            } else {
+                Err(std::env::VarError::NotPresent)
+            }
+        })
+        // 2. Segundo: py_cfg.interpreter (configuración)
+        .or_else(|_| {
+            py_cfg.interpreter.as_ref().and_then(|path| {
+                if std::path::Path::new(path).exists() {
+                    eprintln!("Using config interpreter: {}", path);
+                    Some(path.clone())
+                } else {
+                    None
+                }
+            }).ok_or(std::env::VarError::NotPresent)
+        })
+        // 3. Tercero: .venv autodetect
+        .or_else(|_| {
+            find_venv_python(&cwd).ok_or(std::env::VarError::NotPresent)
+        })
+        // 4. Default: "python"
+        .unwrap_or_else(|_| {
+            eprintln!("No specific Python found, using default: python");
+            "python".to_string()
+        });
     
     let module = py_cfg
         .module

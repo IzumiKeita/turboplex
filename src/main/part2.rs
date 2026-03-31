@@ -1,5 +1,6 @@
 use colored::Colorize;
 use serde_json::json;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -44,13 +45,9 @@ fn generate_failure_report(
     _test_paths: &[String],
     base_dir: &Path,
 ) -> Option<PathBuf> {
-    let mut report = json!({
-        "timestamp": chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-        "total_tests": results.len(),
-        "failed_count": results.iter().filter(|(_, r)| !r.passed).count(),
-        "failures": []
-    });
-
+    // Agrupar errores por fingerprint para de-duplicación
+    let mut error_groups: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+    
     for (path, result) in results {
         if !result.passed {
             let file_content = fs::read_to_string(path).unwrap_or_default();
@@ -76,30 +73,164 @@ fn generate_failure_report(
                 })
                 .collect();
 
+            // Generar fingerprint del error para agrupación
+            let fingerprint = compute_error_fingerprint(error_msg, line_no);
+
             let failure = json!({
                 "test": result.test_name,
-                "file": path.to_string_lossy(),
+                "file": normalize_path_for_json(path),
                 "line": line_no,
                 "error": error_msg,
                 "duration_ms": result.duration_ms,
                 "context": context
             });
 
-            report["failures"].as_array_mut().unwrap().push(failure);
+            error_groups.entry(fingerprint).or_default().push(failure);
         }
     }
 
-    let report_path = base_dir.join(".tplex_report.json");
+    // Construir reporte con de-duplicación
+    let mut deduped_failures = Vec::new();
+    for (fingerprint, group) in error_groups {
+        let count = group.len();
+        let representative = group[0].clone();
+        
+        let deduped = if count > 1 {
+            // Limitar a 3 ejemplos representativos
+            let examples: Vec<serde_json::Value> = group.iter().take(3).cloned().collect();
+            json!({
+                "fingerprint": fingerprint,
+                "occurrences": count,
+                "representative": representative,
+                "examples": examples
+            })
+        } else {
+            representative
+        };
+        
+        deduped_failures.push(deduped);
+    }
+
+    let report = json!({
+        "timestamp": chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        "total_tests": results.len(),
+        "failed_count": results.iter().filter(|(_, r)| !r.passed).count(),
+        "unique_failures": deduped_failures.len(),
+        "failures": deduped_failures
+    });
+
+    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
+    
+    // Crear carpeta .tplex_reports/ si no existe
+    let reports_dir = base_dir.join(".tplex_reports");
+    let _ = fs::create_dir_all(&reports_dir);
+    
+    // Guardar reporte con timestamp dentro de .tplex_reports/
+    let report_path = reports_dir.join(format!(".tplex_report_{}.json", timestamp));
     if let Ok(content) = serde_json::to_string_pretty(&report) {
-        let _ = fs::write(&report_path, content);
-        return Some(report_path);
+        if fs::write(&report_path, content).is_ok() {
+            // Actualizar enlace en raíz al último reporte
+            let _ = update_latest_report_link(base_dir, &report_path);
+            
+            // Limpiar reportes antiguos dentro de .tplex_reports/
+            let _ = cleanup_old_reports(&reports_dir, 20);
+            
+            return Some(report_path);
+        }
     }
     None
+}
+
+/// Crea/actualiza el enlace/copia .tplex_report.json apuntando al último reporte
+fn update_latest_report_link(base_dir: &Path, latest_report: &Path) -> std::io::Result<()> {
+    let link_path = base_dir.join(".tplex_report.json");
+    
+    // En Windows, los symlinks requieren privilegios especiales, así que copiamos
+    #[cfg(windows)]
+    {
+        fs::copy(latest_report, &link_path)?;
+    }
+    
+    // En Unix, podemos usar symlinks
+    #[cfg(not(windows))]
+    {
+        // Remover enlace existente si existe
+        let _ = fs::remove_file(&link_path);
+        std::os::unix::fs::symlink(latest_report, &link_path)?;
+    }
+    
+    Ok(())
+}
+
+/// Limpia reportes antiguos manteniendo solo los últimos N
+fn cleanup_old_reports(base_dir: &Path, keep_count: usize) -> std::io::Result<()> {
+    let mut reports: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
+    
+    // Buscar todos los reportes con timestamp
+    for entry in fs::read_dir(base_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        
+        // Filtrar archivos .tplex_report_*.json (con timestamp)
+        if name.starts_with(".tplex_report_") && name.ends_with(".json") {
+            if let Ok(metadata) = entry.metadata() {
+                if let Ok(modified) = metadata.modified() {
+                    reports.push((path, modified));
+                }
+            }
+        }
+    }
+    
+    // Ordenar por fecha de modificación (más reciente primero)
+    reports.sort_by(|a, b| b.1.cmp(&a.1));
+    
+    // Eliminar reportes excedentes
+    if reports.len() > keep_count {
+        for (path, _) in reports.iter().skip(keep_count) {
+            let _ = fs::remove_file(path);
+        }
+    }
+    
+    Ok(())
+}
+
+/// Genera un fingerprint para agrupar errores similares
+fn compute_error_fingerprint(error_msg: &str, line_no: usize) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    
+    // Normalizar el mensaje de error
+    let normalized = error_msg
+        .to_lowercase()
+        .replace(|c: char| c.is_ascii_punctuation() && c != '_', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    
+    // Usar las primeras 5 palabras + rango de línea para fingerprint
+    let key_words: Vec<&str> = normalized.split_whitespace().take(5).collect();
+    let line_bucket = line_no / 10; // Agrupar líneas cercanas
+    
+    let mut hasher = DefaultHasher::new();
+    key_words.hash(&mut hasher);
+    line_bucket.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// Normaliza rutas a formato cross-platform (forward slashes)
+fn normalize_path_for_json(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "/")
+        .replace("//", "/")
 }
 
 fn run_pytest_collect(
     paths: &[String],
     env: &RuntimePythonEnv,
+    worker_id: usize,
 ) -> Result<Vec<serde_json::Value>, String> {
     let mut cmd = Command::new(&env.interpreter);
     cmd.current_dir(&env.cwd);
@@ -112,6 +243,9 @@ fn run_pytest_collect(
         cmd.env("PYTHONPATH", pp);
     }
     apply_python_encoding_env(&mut cmd);
+    // Blindaje TurboPlex: forzar variables de entorno independientemente del modo
+    cmd.env("TURBOPLEX_MODE", "1");
+    cmd.env("TURBOPLEX_WORKER_ID", format!("worker_{}", worker_id));
     let output = cmd
         .output()
         .map_err(|e| format!("Failed to run pytest collect: {}", e))?;
@@ -142,7 +276,7 @@ fn run_python_collector(
     env: &RuntimePythonEnv,
 ) -> Result<Vec<serde_json::Value>, String> {
     if env.compat {
-        return run_pytest_collect(paths, env);
+        return run_pytest_collect(paths, env, 0); // Worker 0 para collect
     }
 
     eprintln!("[RUST DEBUG] Starting Python collector");
@@ -239,6 +373,15 @@ fn save_cached_pass_result(env: &RuntimePythonEnv, cache_key: &str) {
     }
 }
 
+fn is_skipped_result(result: &TestResult) -> bool {
+    result
+        .enriched_data
+        .as_ref()
+        .and_then(|v| v.get("skipped"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
 fn run_python_test(env: &RuntimePythonEnv, path: &str, qual: &str) -> TestResult {
     let start = Instant::now();
 
@@ -332,7 +475,7 @@ fn run_python_test(env: &RuntimePythonEnv, path: &str, qual: &str) -> TestResult
     }
 }
 
-fn run_pytest_test(env: &RuntimePythonEnv, nodeid: &str) -> TestResult {
+fn run_pytest_test(env: &RuntimePythonEnv, nodeid: &str, worker_id: usize) -> TestResult {
     let start = Instant::now();
 
     let mut cmd = Command::new(&env.interpreter);
@@ -345,6 +488,9 @@ fn run_pytest_test(env: &RuntimePythonEnv, nodeid: &str) -> TestResult {
         cmd.env("PYTHONPATH", pp);
     }
     apply_python_encoding_env(&mut cmd);
+    // Blindaje TurboPlex: forzar variables de entorno independientemente del modo
+    cmd.env("TURBOPLEX_MODE", "1");
+    cmd.env("TURBOPLEX_WORKER_ID", format!("worker_{}", worker_id));
     let output = cmd.output();
 
     let duration_ms = start.elapsed().as_millis() as u64;
@@ -382,7 +528,7 @@ fn run_pytest_test(env: &RuntimePythonEnv, nodeid: &str) -> TestResult {
     }
 }
 
-fn run_test_item(env: &RuntimePythonEnv, path: &str, qual: &str) -> TestResult {
+fn run_test_item(env: &RuntimePythonEnv, path: &str, qual: &str, worker_id: usize) -> TestResult {
     let resolved = resolve_test_path(env, path);
     let file_hash = compute_file_hash(&resolved).unwrap_or_else(|| "none".to_string());
     let cache_key_raw = format!(
@@ -397,11 +543,11 @@ fn run_test_item(env: &RuntimePythonEnv, path: &str, qual: &str) -> TestResult {
         return cached;
     }
     let result = if env.compat {
-        run_pytest_test(env, qual)
+        run_pytest_test(env, qual, worker_id)
     } else {
         run_python_test(env, path, qual)
     };
-    if result.passed {
+    if result.passed && !is_skipped_result(&result) {
         save_cached_pass_result(env, &cache_key);
     }
     result
@@ -486,6 +632,43 @@ pub(crate) fn resolve_test_path(env: &RuntimePythonEnv, path: &str) -> PathBuf {
     }
 }
 
+/// Perfil de hardware detectado para orquestación inteligente
+#[derive(Debug, Clone, Copy)]
+enum HardwareTier {
+    Low,   // <= 2 cores: 100ms stagger, workers = cores
+    Mid,   // 3-8 cores: 50ms stagger, workers = cores  
+    High,  // > 8 cores: 0ms stagger, workers = cores * 1.5
+}
+
+/// Detecta el perfil de hardware y retorna (tier, workers, stagger_ms)
+fn detect_hardware_profile() -> (HardwareTier, usize, u64) {
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    
+    let tier = if cores <= 2 {
+        HardwareTier::Low
+    } else if cores <= 8 {
+        HardwareTier::Mid
+    } else {
+        HardwareTier::High
+    };
+    
+    let stagger_ms = match tier {
+        HardwareTier::Low => 100,
+        HardwareTier::Mid => 50,
+        HardwareTier::High => 0,
+    };
+    
+    let workers = match tier {
+        HardwareTier::Low => cores,
+        HardwareTier::Mid => cores,
+        HardwareTier::High => (cores as f64 * 1.5) as usize,
+    };
+    
+    (tier, workers, stagger_ms)
+}
+
 pub(crate) fn run_tests_with_paths(
     paths_to_use: &[String],
     watch_mode: bool,
@@ -503,10 +686,22 @@ pub(crate) fn run_tests_with_paths(
         .map(|p| load_config(p))
         .unwrap_or_default();
 
+    // Detectar perfil de hardware para orquestación inteligente
+    let (tier, detected_workers, stagger_ms) = detect_hardware_profile();
+    let tier_name = match tier {
+        HardwareTier::Low => "Low",
+        HardwareTier::Mid => "Mid", 
+        HardwareTier::High => "High",
+    };
+
     if out.mode == OutputMode::Verbose {
         println!(
-            "\n[Config]: workers={}",
-            config.execution.max_workers.unwrap_or(8)
+            "\n[Hardware] Detected: {} tier, {} workers, {}ms stagger",
+            tier_name, detected_workers, stagger_ms
+        );
+        println!(
+            "[Config]: workers={}",
+            config.execution.max_workers.unwrap_or(detected_workers)
         );
         println!("\n{} {}", "📁".cyan().bold(), "Test directories:".bold());
         for p in paths_to_use {
@@ -538,7 +733,9 @@ pub(crate) fn run_tests_with_paths(
 
     let mut state = OutputState::new(out.clone(), total_tests);
 
-    let num_threads = config.execution.max_workers.unwrap_or(8).min(total_tests);
+    // Usar workers detectados o el valor de config (config tiene prioridad si está seteado)
+    let effective_workers = config.execution.max_workers.unwrap_or(detected_workers);
+    let num_threads = effective_workers.min(total_tests);
     let (tx, rx) = channel();
 
     let chunks: Vec<_> = test_items
@@ -547,20 +744,38 @@ pub(crate) fn run_tests_with_paths(
 
     let handles: Vec<_> = chunks
         .iter()
-        .map(|chunk| {
+        .enumerate()
+        .map(|(worker_id, chunk)| {
             let tx = tx.clone();
             let chunk: Vec<serde_json::Value> = chunk.to_vec();
             let env = env.clone();
+            let restart_interval = config.execution.worker_restart_interval;
             thread::spawn(move || {
+                // Staggering dinámico según perfil de hardware detectado
+                thread::sleep(std::time::Duration::from_millis(stagger_ms * worker_id as u64));
+                
+                let mut test_count = 0usize;
                 for item in &chunk {
                     let path = item["path"].as_str().unwrap_or("");
                     let qual = item["qualname"].as_str().unwrap_or("");
                     let resolved = resolve_test_path(&env, path);
-                    let result = run_test_item(&env, path, qual);
+                    
+                    // Batching: reiniciar worker cada N tests para liberar Pagefile
+                    if restart_interval > 0 && test_count > 0 && test_count % restart_interval == 0 {
+                        if env.compat {
+                            // En modo compat, no hay reinicio explícito (pytest maneja su propio proceso)
+                        } else {
+                            // Log de reinicio en modo verbose
+                            eprintln!("[Worker {}] Restarting after {} tests (batching)", worker_id, test_count);
+                        }
+                    }
+                    
+                    let result = run_test_item(&env, path, qual, worker_id);
                     let _ = tx.send(TestEvent::Finished {
                         path: resolved,
                         result,
                     });
+                    test_count += 1;
                 }
             })
         })

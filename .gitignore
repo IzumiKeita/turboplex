@@ -3,6 +3,9 @@ Thumbs.db
 ehthumbs.db
 Desktop.ini
 $RECYCLE.BIN/
+.experimental/
+.one-off-scripts/
+.trae/
 
 *.log
 *.tmp
