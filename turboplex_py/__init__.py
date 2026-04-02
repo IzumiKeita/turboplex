@@ -1,6 +1,6 @@
 """Public API for tests: ``from turboplex_py import skip, skipif, fixture``.
 
-Also provides database fixtures via ``from turboplex_py.db_fixtures import db, client``.
+Also provides database fixtures via ``from turboplex_py.db.fixtures import db, client``.
 """
 
 from __future__ import annotations

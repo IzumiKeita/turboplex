@@ -6,6 +6,7 @@ import sys
 import threading
 import time
 
+from .config import load_mcp_config
 from .errors import ToolTimeout
 from .win32 import win_assign_job_object, win_close_job_object, kill_tree_windows
 
@@ -90,9 +91,10 @@ def run_popen_with_drain_and_heartbeat(
     """
     from subprocess import PIPE, Popen
 
-    hb_s = env_timeout_s("TPX_MCP_HEARTBEAT_S", default=1.0)
-    kill_grace_s = env_timeout_s("TPX_MCP_TERMINATE_GRACE_S", default=2.0)
-    max_chars = int(env_timeout_s("TPX_MCP_DRAIN_MAX_CHARS", default=2_000_000.0))
+    cfg = load_mcp_config()
+    hb_s = cfg.heartbeat_s
+    kill_grace_s = cfg.terminate_grace_s
+    max_chars = cfg.drain_max_chars
 
     p = Popen(
         cmd,

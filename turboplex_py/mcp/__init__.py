@@ -1,6 +1,8 @@
 """MCP Server package for TurboPlex."""
 
-from .errors import ToolTimeout, ToolSubprocessError
+from .errors import ToolTimeout, ToolSubprocessError, classify_db_error
+from .config import load_mcp_config, McpConfig
+from .schema import ToolError, ToolPayload, payload_ok, payload_error
 from .utils import uuid_v7, json_normalize, resolve_python_executable
 from .io import StdoutJsonRpcGuard, install_stdio_guard, tool_json, attach_logs
 from .win32 import kill_tree_windows, win_assign_job_object, win_close_job_object
@@ -16,6 +18,13 @@ from .collect import turboplex_collect, turboplex_run_one, pytest_collect, pytes
 __all__ = [
     "ToolTimeout",
     "ToolSubprocessError",
+    "classify_db_error",
+    "McpConfig",
+    "load_mcp_config",
+    "ToolError",
+    "ToolPayload",
+    "payload_ok",
+    "payload_error",
     "uuid_v7",
     "json_normalize",
     "resolve_python_executable",

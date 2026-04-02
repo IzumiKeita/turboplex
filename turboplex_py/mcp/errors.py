@@ -1,4 +1,7 @@
 """MCP errors and exceptions."""
+from __future__ import annotations
+
+from typing import Any
 
 
 class ToolTimeout(Exception):
@@ -11,7 +14,7 @@ class ToolTimeout(Exception):
 
     def as_error(self) -> dict:
         return {
-            "kind": "timeout",
+            "code": "timeout",
             "phase": self.phase,
             "timeout_s": self.timeout_s,
             "message": str(self),
@@ -38,7 +41,7 @@ class ToolSubprocessError(Exception):
 
     def as_error(self) -> dict:
         out = {
-            "kind": "subprocess_failed",
+            "code": "subprocess_failed",
             "phase": self.phase,
             "returncode": self.returncode,
             "message": str(self),
@@ -48,3 +51,35 @@ class ToolSubprocessError(Exception):
         if self.stdout is not None:
             out["stdout"] = self.stdout
         return out
+
+
+def classify_db_error(exc: Any) -> dict:
+    """Classify database exception into generic + vendor code."""
+    msg = str(exc) if exc is not None else ""
+    lower = msg.lower()
+    vendor_code = None
+    generic = "db_internal"
+
+    if "deadlock" in lower:
+        generic = "db_deadlock"
+    elif "timeout" in lower or "timed out" in lower:
+        generic = "db_timeout"
+    elif "integrity" in lower or "duplicate" in lower or "unique" in lower or "foreign key" in lower:
+        generic = "db_integrity_violation"
+    elif "connect" in lower or "connection" in lower:
+        generic = "db_connection"
+    elif "syntax" in lower:
+        generic = "db_syntax"
+
+    # Try common attributes from DB drivers
+    for attr in ("sqlstate", "pgcode", "errno", "code"):
+        if hasattr(exc, attr):
+            try:
+                val = getattr(exc, attr)
+                if val is not None and val != "":
+                    vendor_code = val
+                    break
+            except Exception:
+                pass
+
+    return {"code": generic, "vendor_code": vendor_code, "message": msg}

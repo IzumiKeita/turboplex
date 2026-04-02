@@ -219,6 +219,18 @@ fn skip_reason(result: &TestResult) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+fn fixture_source(result: &TestResult) -> Option<String> {
+    if result.cached {
+        return Some("cached".to_string());
+    }
+    result
+        .enriched_data
+        .as_ref()
+        .and_then(|v| v.get("fixture_source"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
 fn build_run_payload(
     cwd: &Path,
     results: &[(PathBuf, TestResult)],
@@ -252,6 +264,7 @@ fn build_run_payload(
                 "skipped": is_sk,
                 "skip_reason": skip_reason(r),
                 "cached": r.cached,
+                "fixture_source": fixture_source(r),
                 "duration_ms": r.duration_ms,
                 "error": r.error,
             })
@@ -284,10 +297,7 @@ fn build_run_payload(
     })
 }
 
-fn write_jsonl_report(
-    results: &[(PathBuf, TestResult)],
-    report_path: &Path,
-) -> Result<(), String> {
+fn write_jsonl_report(results: &[(PathBuf, TestResult)], report_path: &Path) -> Result<(), String> {
     let mut file = OpenOptions::new()
         .create(true)
         .write(true)
@@ -302,16 +312,21 @@ fn write_jsonl_report(
             "passed": result.passed,
             "duration_ms": result.duration_ms,
             "cached": result.cached,
+            "fixture_source": fixture_source(result),
             // Si falló, incluir el error_context completo del Python runner
             "error_context": if result.passed { None } else { result.enriched_data.as_ref().and_then(|d| d.get("error_context")) },
             "test_info": result.enriched_data.as_ref().and_then(|d| d.get("test_info")),
             "fixtures_used": result.enriched_data.as_ref().and_then(|d| d.get("fixtures_used")),
         });
-        
-        writeln!(file, "{}", serde_json::to_string(&line).map_err(|e| e.to_string())?)
-            .map_err(|e| format!("Write error: {}", e))?;
+
+        writeln!(
+            file,
+            "{}",
+            serde_json::to_string(&line).map_err(|e| e.to_string())?
+        )
+        .map_err(|e| format!("Write error: {}", e))?;
     }
-    
+
     Ok(())
 }
 

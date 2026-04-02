@@ -12,18 +12,19 @@ pub fn generate_junit_xml(
     output_path: &Path,
 ) -> Result<(), std::io::Error> {
     let mut xml = String::new();
-    
+
     // Count stats
     let total = results.len();
     let failures = results.iter().filter(|(_, r)| !r.passed).count();
     let errors = 0usize;
     let skipped = 0usize;
-    
+
     // Calculate total time
-    let total_time_sec: f64 = results.iter()
+    let total_time_sec: f64 = results
+        .iter()
         .map(|(_, r)| r.duration_ms as f64 / 1000.0)
         .sum();
-    
+
     // XML header
     xml.push_str(r#"<?xml version="1.0" encoding="UTF-8"?>"#);
     xml.push('\n');
@@ -37,21 +38,25 @@ pub fn generate_junit_xml(
         total_time_sec
     ));
     xml.push('\n');
-    
+
     // Group by file path for testcases
     let mut by_file: HashMap<String, Vec<(String, TestResult)>> = HashMap::new();
     for (path, result) in results.iter() {
-        by_file.entry(path.clone()).or_default().push((path.clone(), result.clone()));
+        by_file
+            .entry(path.clone())
+            .or_default()
+            .push((path.clone(), result.clone()));
     }
-    
+
     // Generate testsuite for each file
     for (file_path, tests) in by_file.iter() {
         let file_total = tests.len();
         let file_failures = tests.iter().filter(|(_, r)| !r.passed).count();
-        let file_time: f64 = tests.iter()
+        let file_time: f64 = tests
+            .iter()
             .map(|(_, r)| r.duration_ms as f64 / 1000.0)
             .sum();
-        
+
         xml.push_str(&format!(
             r#"  <testsuite name="{}" tests="{}" failures="{}" errors="0" skipped="0" time="{:.3}">"#,
             escape_xml(file_path),
@@ -60,19 +65,19 @@ pub fn generate_junit_xml(
             file_time
         ));
         xml.push('\n');
-        
+
         // Test cases
         for (test_path, result) in tests.iter() {
             let test_name = extract_test_name(test_path);
             let time_sec = result.duration_ms as f64 / 1000.0;
-            
+
             xml.push_str(&format!(
                 r#"    <testcase name="{}" classname="{}" time="{:.3}">"#,
                 escape_xml(&test_name),
                 escape_xml(file_path),
                 time_sec
             ));
-            
+
             if !result.passed {
                 if let Some(ref error) = result.error {
                     xml.push('\n');
@@ -84,7 +89,7 @@ pub fn generate_junit_xml(
                     xml.push('\n');
                     xml.push_str("    </testcase>");
                 } else {
-                    xml.push_str(">");
+                    xml.push('>');
                     xml.push('\n');
                     xml.push_str(r#"      <failure message="Test failed" type="AssertionError"/>"#);
                     xml.push('\n');
@@ -95,18 +100,18 @@ pub fn generate_junit_xml(
             }
             xml.push('\n');
         }
-        
+
         xml.push_str("  </testsuite>");
         xml.push('\n');
     }
-    
+
     xml.push_str("</testsuites>");
     xml.push('\n');
-    
+
     // Write to file
     let mut file = File::create(output_path)?;
     file.write_all(xml.as_bytes())?;
-    
+
     Ok(())
 }
 

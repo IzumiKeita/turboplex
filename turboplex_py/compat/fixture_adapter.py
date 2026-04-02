@@ -11,8 +11,8 @@ import logging
 from typing import Any, Callable, Dict, Generator, List, Optional, TypeVar, Tuple
 from functools import wraps
 
-from .fixtures import fixture as turboplex_fixture
-from .pytest_bridge import PytestBridge, PytestFixtureInfo
+from ..fixtures import fixture as turboplex_fixture
+from .bridge import PytestBridge, PytestFixtureInfo
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -265,29 +265,46 @@ class FixtureInjector:
     
     def _is_fixture(self, name: str) -> bool:
         """Verifica si un nombre corresponde a un fixture registrado."""
+        # Built-in fixtures nativos de TurboPlex
+        if name in self.bridge.BUILTIN_FIXTURES:
+            return True
+        
         # caplog es un fixture built-in de pytest para capturar logs
         if name == 'caplog':
             return True
         
-        # Buscar en el fixture manager del bridge
+        # Buscar en el fixture manager del bridge (fixtures de pytest detectadas por AST)
         fixture_info = self.bridge.fixture_manager.get(name)
         if fixture_info:
             return True
         
-        # También buscar en conftest cargado
+        # Buscar en conftest cargado
         if self.bridge._conftest_module and hasattr(self.bridge._conftest_module, name):
             obj = getattr(self.bridge._conftest_module, name)
-            # Verificar si es un fixture (tiene marca de pytest)
+            # Verificar si es un fixture de pytest (tiene marca de pytest)
             if hasattr(obj, '_pytestfixturefunction'):
                 return True
-            # O si está en la lista de fixtures conocidos
+            # Verificar si es un fixture de TurboPlex (tiene marca _tt_fixture)
+            if hasattr(obj, '_tt_fixture') and getattr(obj, '_tt_fixture'):
+                return True
+            # O si está en la lista de fixtures conocidos del bridge
             if callable(obj) and name in self.bridge.fixture_manager.fixtures:
+                return True
+            # Verificar si está en el registro __tt_fixtures__ del módulo
+            tt_fixtures = getattr(self.bridge._conftest_module, '__tt_fixtures__', {})
+            if isinstance(tt_fixtures, dict) and name in tt_fixtures:
                 return True
         
         return False
     
     def _resolve_fixture(self, name: str) -> Any:
         """Resuelve un fixture por nombre."""
+        import inspect
+        
+        # Built-in fixtures nativos de TurboPlex
+        if name in self.bridge.BUILTIN_FIXTURES:
+            return self.bridge.get_fixture_value(name)
+        
         # caplog: crear LogCaptureHandler para capturar logs
         if name == 'caplog':
             handler = LogCaptureHandler()
@@ -298,7 +315,42 @@ class FixtureInjector:
         if name in self._module_fixture_values:
             return self._module_fixture_values[name]
         
-        # Si no, usar el bridge para obtener el valor
+        # Si es un fixture de TurboPlex en el conftest, ejecutarlo correctamente
+        if self.bridge._conftest_module:
+            # Verificar en el registro __tt_fixtures__
+            tt_fixtures = getattr(self.bridge._conftest_module, '__tt_fixtures__', {})
+            if isinstance(tt_fixtures, dict) and name in tt_fixtures:
+                fix_fn = tt_fixtures[name]
+                if inspect.isgeneratorfunction(fix_fn):
+                    # Es un generador - ejecutar y obtener el primer valor
+                    gen = fix_fn()
+                    try:
+                        value = next(gen)
+                        # Guardar el generador para cleanup posterior en el adapter
+                        self.adapter._active_generators[name] = gen
+                        return value
+                    except StopIteration:
+                        return None
+                else:
+                    # Función normal
+                    return fix_fn()
+            
+            # Verificar si es un atributo del módulo con marca _tt_fixture
+            if hasattr(self.bridge._conftest_module, name):
+                obj = getattr(self.bridge._conftest_module, name)
+                if hasattr(obj, '_tt_fixture') and getattr(obj, '_tt_fixture'):
+                    if inspect.isgeneratorfunction(obj):
+                        gen = obj()
+                        try:
+                            value = next(gen)
+                            self.adapter._active_generators[name] = gen
+                            return value
+                        except StopIteration:
+                            return None
+                    else:
+                        return obj()
+        
+        # Si no, usar el bridge para obtener el valor (fixtures de pytest)
         return self.bridge.get_fixture_value(name)
     
     def _cleanup_fixture(self, name: str):
@@ -335,4 +387,4 @@ def adapt_pytest_fixtures(bridge: Optional[PytestBridge] = None) -> Callable:
 
 
 # Importar factory del bridge
-from .pytest_bridge import create_bridge_for_test
+from .bridge import create_bridge_for_test

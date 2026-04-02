@@ -220,6 +220,50 @@ El caché se almacena en `.turboplex_cache/` y se invalida automáticamente cuan
 }
 ```
 
+### MCP para IDE/Agentes (`tpx mcp`)
+
+- Contrato estable por herramienta (`discover`, `run`, `get_report`): `schemaVersion`, `tool`, `ok`, `runId`, `mode`, `summary`, `logs`, `data`.
+- En errores (`ok=false`), `data.error` usa:
+  - `code`: `timeout | subprocess_failed | invalid_input | not_found | internal_error`
+  - `message`: texto legible
+  - `details`: opcional (`phase`, `returncode`, `timeout_s`, etc.)
+- `run.summary` incluye métricas operativas: `workers_used`, `timeouts`, `subprocess_failures`.
+- Extensiones DB-first:
+  - `data.results[].db_metrics.write_count`
+  - `data.results[].db_dirty`
+  - `data.results[].db_dirty_summary`
+  - `run.summary.db_write_count_total`
+  - `run.summary.db_dirty_tests`
+
+Cobertura de integración agregada hoy:
+- `tests/test_mcp_db_integration.py` valida `run` de MCP con escrituras reales en SQLite.
+- Política strict dirty validada:
+  - `TPX_DB_STRICT_DIRTY=0` -> la corrida puede pasar reportando `db_dirty`.
+  - `TPX_DB_STRICT_DIRTY=1` -> la corrida falla con `db_error.code=db_dirty_state`.
+- Se añadió variante subprocess-only con `xfail` en Windows por crash nativo ocasional `0xC0000005` (Access Violation).
+
+Variables de entorno MCP más comunes:
+- `TPX_PYTHON_EXE`
+- `TPX_MCP_LIGHT_COLLECT=1`
+- `TPX_MCP_DEBUG=1`
+- `TPX_MCP_STDOUT_MODE=redirect|failfast`
+- `TPX_MCP_TEST_TIMEOUT_S` (default 120)
+- `TPX_MCP_TURBOPLEX_COLLECT_TIMEOUT_S` (default 120)
+- `TPX_MCP_TURBOPLEX_RUN_TIMEOUT_S` (default 60)
+- `TPX_MCP_PYTEST_COLLECT_TIMEOUT_S` / `TPX_PYTEST_COLLECT_TIMEOUT_S` (default 120)
+- `TPX_MCP_PYTEST_RUN_TIMEOUT_S` / `TPX_PYTEST_RUN_TIMEOUT_S` (default 60)
+- `TPX_MCP_HEARTBEAT_S` (default 1)
+- `TPX_MCP_TERMINATE_GRACE_S` (default 2)
+- `TPX_MCP_DRAIN_MAX_CHARS` (default 2000000)
+- `TPX_MCP_LOGS_MAX_CHARS` (default 20000)
+
+Variables de hardening DB:
+- `TPX_DB_STRICT_DIRTY=0|1` (default `0`, solo falla si está en `1`)
+- `TPX_DB_METRICS_ENABLED=0|1` (default `1`)
+- `TPX_DB_ISOLATION_MODE=auto|schema|database|transaction` (default `auto`)
+- `TPX_DB_WORKER_PREFIX=tpx_w`
+- `TPX_DB_DIRTY_TRACK_MAX_TABLES=12`
+
 <a id="es-comandos"></a>
 ## Comandos
 

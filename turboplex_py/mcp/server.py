@@ -13,6 +13,11 @@ from turboplex_py.mcp import (
     ToolSubprocessError,
     uuid_v7,
     json_normalize,
+    load_mcp_config,
+    ToolError,
+    classify_db_error,
+    payload_ok,
+    payload_error,
     install_stdio_guard,
     tool_json,
     attach_logs,
@@ -20,8 +25,21 @@ from turboplex_py.mcp import (
     turboplex_run_one,
     pytest_collect,
     pytest_run,
-    env_timeout_s,  # Added for per-test timeout
 )
+
+def _map_error(e: Exception) -> ToolError:
+    if isinstance(e, (ToolTimeout, ToolSubprocessError)):
+        raw = e.as_error()
+        details = {k: v for k, v in raw.items() if k not in ("code", "message")}
+        return ToolError(code=raw.get("code", "internal_error"), message=raw.get("message", str(e)), details=details or None)
+    db = classify_db_error(e)
+    if db.get("code") != "db_internal":
+        return ToolError(
+            code=db.get("code", "db_internal"),
+            message=db.get("message", str(e)),
+            vendor_code=db.get("vendor_code"),
+        )
+    return ToolError(code="internal_error", message=str(e))
 
 
 def _build_server():
@@ -33,6 +51,8 @@ def _build_server():
         ) from e
 
     mcp = FastMCP("TurboPlex", json_response=True)
+
+    cfg = load_mcp_config()
 
     @mcp.tool()
     def ping() -> str:
@@ -55,6 +75,7 @@ def _build_server():
         with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
             try:
                 paths = paths or ["."]
+                workers_used = 1
                 if compat:
                     raw_items = pytest_collect(paths)
                     mode = "pytest"
@@ -69,31 +90,28 @@ def _build_server():
                     if isinstance(p, str):
                         rel = os.path.relpath(p, start=root)
                         it["path"] = rel.replace("\\", "/")
-                payload = {
-                    "schemaVersion": "tpx.mcp.tool.v1",
-                    "tool": "discover",
-                    "ok": True,
-                    "runId": run_id,
-                    "mode": mode,
-                    "summary": {"total": len(items), "duration_ms": int((time.perf_counter() - t0) * 1000)},
-                    "logs": {},
-                    "data": {"items": items},
-                }
+                payload = payload_ok(
+                    tool="discover",
+                    run_id=run_id,
+                    mode=mode,
+                    summary={
+                        "total": len(items),
+                        "duration_ms": int((time.perf_counter() - t0) * 1000),
+                        "workers_used": workers_used,
+                        "timeouts": 0,
+                        "subprocess_failures": 0,
+                        "collect_timeout_s": cfg.pytest_collect_timeout_s if compat else cfg.turboplex_collect_timeout_s,
+                    },
+                    data={"items": items},
+                )
             except Exception as e:
-                if isinstance(e, (ToolTimeout, ToolSubprocessError)):
-                    err = e.as_error()
-                else:
-                    err = str(e)
-                payload = {
-                    "schemaVersion": "tpx.mcp.tool.v1",
-                    "tool": "discover",
-                    "ok": False,
-                    "runId": run_id,
-                    "mode": "pytest" if compat else "turboplex",
-                    "summary": {"duration_ms": int((time.perf_counter() - t0) * 1000)},
-                    "logs": {},
-                    "data": {"error": err},
-                }
+                payload = payload_error(
+                    tool="discover",
+                    run_id=run_id,
+                    mode="pytest" if compat else "turboplex",
+                    duration_ms=int((time.perf_counter() - t0) * 1000),
+                    error=_map_error(e),
+                )
         attach_logs(payload, buf_out.getvalue(), buf_err.getvalue())
         return tool_json(payload)
 
@@ -107,12 +125,14 @@ def _build_server():
             try:
                 results = []
                 root = os.getcwd()
+                workers_used = 0
+                timeouts = 0
                 if selection is None:
                     raise RuntimeError("selection es requerido")
 
                 if compat:
                     if not isinstance(selection, list):
-                        raise RuntimeError("compat=true requiere selection: string[] (nodeids)")
+                        raise ValueError("compat=true requiere selection: string[] (nodeids)")
                     nodeids = []
                     for s in selection:
                         if isinstance(s, str):
@@ -124,8 +144,8 @@ def _build_server():
                     nodeids = [n for n in nodeids if n]
                     if nodeids:
                         workers = max_workers or min(8, len(nodeids), (os.cpu_count() or 1))
-                        # Per-test timeout from environment
-                        test_timeout_s = env_timeout_s("TPX_MCP_TEST_TIMEOUT_S", default=120.0)
+                        workers_used = workers
+                        test_timeout_s = cfg.test_timeout_s
                         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
                             futs = {ex.submit(pytest_run, nid): nid for nid in nodeids}
                             for fut in concurrent.futures.as_completed(futs):
@@ -133,16 +153,17 @@ def _build_server():
                                 try:
                                     r = fut.result(timeout=test_timeout_s)
                                 except concurrent.futures.TimeoutError:
+                                    timeouts += 1
                                     r = {"passed": False, "duration_ms": int(test_timeout_s * 1000), "error": f"Test timeout after {test_timeout_s}s"}
                                 results.append({"test": nid, "path": nid.split("::", 1)[0], **r})
                     mode = "pytest"
                 else:
                     if not isinstance(selection, list):
-                        raise RuntimeError("compat=false requiere selection: object[] con {path, qualname}")
+                        raise ValueError("compat=false requiere selection: object[] con {path, qualname}")
                     items = []
                     for s in selection:
                         if not isinstance(s, dict):
-                            raise RuntimeError("compat=false requiere selection: object[] con {path, qualname}")
+                            raise ValueError("compat=false requiere selection: object[] con {path, qualname}")
                         path = s.get("path")
                         qual = s.get("qualname")
                         if not isinstance(path, str) or not isinstance(qual, str) or not path or not qual:
@@ -150,8 +171,8 @@ def _build_server():
                         items.append((path, qual))
                     if items:
                         workers = max_workers or min(8, len(items), (os.cpu_count() or 1))
-                        # Per-test timeout from environment
-                        test_timeout_s = env_timeout_s("TPX_MCP_TEST_TIMEOUT_S", default=60.0)
+                        workers_used = workers
+                        test_timeout_s = cfg.test_timeout_s
                         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
                             futs = {ex.submit(turboplex_run_one, p, q): (p, q) for (p, q) in items}
                             for fut in concurrent.futures.as_completed(futs):
@@ -159,6 +180,7 @@ def _build_server():
                                 try:
                                     r = fut.result(timeout=test_timeout_s)
                                 except concurrent.futures.TimeoutError:
+                                    timeouts += 1
                                     r = {"passed": False, "duration_ms": int(test_timeout_s * 1000), "error": f"Test timeout after {test_timeout_s}s"}
                                 relp = os.path.relpath(p, start=root).replace("\\", "/")
                                 results.append({"test": q, "path": relp, **json_normalize(r)})
@@ -166,32 +188,42 @@ def _build_server():
 
                 results.sort(key=lambda r: (r.get("path") or "", r.get("test") or ""))
                 failed = sum(1 for r in results if not r.get("passed"))
+                subprocess_failures = sum(1 for r in results if isinstance(r.get("error"), str) and "subprocess" in r.get("error", "").lower())
+                db_write_count_total = sum(
+                    int(((r.get("db_metrics") or {}).get("write_count") or 0))
+                    for r in results
+                    if isinstance(r, dict)
+                )
+                db_dirty_tests = sum(1 for r in results if bool(r.get("db_dirty")))
                 dt = int((time.perf_counter() - t0) * 1000)
-                payload = {
-                    "schemaVersion": "tpx.mcp.tool.v1",
-                    "tool": "run",
-                    "ok": True,
-                    "runId": run_id,
-                    "mode": mode,
-                    "summary": {"total": len(results), "failed": failed, "passed": failed == 0, "duration_ms": dt},
-                    "logs": {},
-                    "data": {"results": results},
-                }
+                payload = payload_ok(
+                    tool="run",
+                    run_id=run_id,
+                    mode=mode,
+                    summary={
+                        "total": len(results),
+                        "failed": failed,
+                        "passed": failed == 0,
+                        "duration_ms": dt,
+                        "workers_used": workers_used,
+                        "timeouts": timeouts,
+                        "subprocess_failures": subprocess_failures,
+                        "db_write_count_total": db_write_count_total,
+                        "db_dirty_tests": db_dirty_tests,
+                    },
+                    data={"results": results},
+                )
             except Exception as e:
-                if isinstance(e, (ToolTimeout, ToolSubprocessError)):
-                    err = e.as_error()
-                else:
-                    err = str(e)
-                payload = {
-                    "schemaVersion": "tpx.mcp.tool.v1",
-                    "tool": "run",
-                    "ok": False,
-                    "runId": run_id,
-                    "mode": "pytest" if compat else "turboplex",
-                    "summary": {"duration_ms": int((time.perf_counter() - t0) * 1000)},
-                    "logs": {},
-                    "data": {"error": err},
-                }
+                err = _map_error(e)
+                if isinstance(e, ValueError):
+                    err.code = "invalid_input"
+                payload = payload_error(
+                    tool="run",
+                    run_id=run_id,
+                    mode="pytest" if compat else "turboplex",
+                    duration_ms=int((time.perf_counter() - t0) * 1000),
+                    error=err,
+                )
         attach_logs(payload, buf_out.getvalue(), buf_err.getvalue())
         return tool_json(payload)
 
@@ -206,42 +238,36 @@ def _build_server():
                 p = pathlib.Path(path) if path else pathlib.Path(os.getcwd()) / ".tplex_report.json"
                 rel = os.path.relpath(str(p), start=os.getcwd()).replace("\\", "/")
                 if not p.is_file():
-                    payload = {
-                        "schemaVersion": "tpx.mcp.tool.v1",
-                        "tool": "get_report",
-                        "ok": True,
-                        "runId": run_id,
-                        "mode": "turboplex",
-                        "summary": {"found": False, "duration_ms": int((time.perf_counter() - t0) * 1000)},
-                        "logs": {},
-                        "data": {"found": False, "path": rel, "report": None},
-                        "artifacts": [{"kind": "report", "uri": rel, "contentType": "application/json"}],
-                    }
+                    payload = payload_ok(
+                        tool="get_report",
+                        run_id=run_id,
+                        mode="turboplex",
+                        summary={"found": False, "duration_ms": int((time.perf_counter() - t0) * 1000)},
+                        data={"found": False, "path": rel, "report": None},
+                        artifacts=[{"kind": "report", "uri": rel, "contentType": "application/json"}],
+                    )
                 else:
                     import json
                     report = json.loads(p.read_text(encoding="utf-8", errors="replace"))
-                    payload = {
-                        "schemaVersion": "tpx.mcp.tool.v1",
-                        "tool": "get_report",
-                        "ok": True,
-                        "runId": run_id,
-                        "mode": "turboplex",
-                        "summary": {"found": True, "duration_ms": int((time.perf_counter() - t0) * 1000)},
-                        "logs": {},
-                        "data": {"found": True, "path": rel, "report": report},
-                        "artifacts": [{"kind": "report", "uri": rel, "contentType": "application/json"}],
-                    }
+                    payload = payload_ok(
+                        tool="get_report",
+                        run_id=run_id,
+                        mode="turboplex",
+                        summary={"found": True, "duration_ms": int((time.perf_counter() - t0) * 1000)},
+                        data={"found": True, "path": rel, "report": report},
+                        artifacts=[{"kind": "report", "uri": rel, "contentType": "application/json"}],
+                    )
             except Exception as e:
-                payload = {
-                    "schemaVersion": "tpx.mcp.tool.v1",
-                    "tool": "get_report",
-                    "ok": False,
-                    "runId": run_id,
-                    "mode": "turboplex",
-                    "summary": {"duration_ms": int((time.perf_counter() - t0) * 1000)},
-                    "logs": {},
-                    "data": {"error": str(e)},
-                }
+                err = _map_error(e)
+                if isinstance(e, FileNotFoundError):
+                    err.code = "not_found"
+                payload = payload_error(
+                    tool="get_report",
+                    run_id=run_id,
+                    mode="turboplex",
+                    duration_ms=int((time.perf_counter() - t0) * 1000),
+                    error=err,
+                )
         attach_logs(payload, buf_out.getvalue(), buf_err.getvalue())
         return tool_json(payload)
 

@@ -12,7 +12,7 @@ import sys
 from typing import Any, Callable, Dict, List, Optional, Tuple
 import logging
 
-from .pytest_bridge import PytestBridge, create_bridge_for_test
+from .bridge import PytestBridge, create_bridge_for_test
 from .fixture_adapter import FixtureInjector
 from .plugin_adapters import get_plugin_manager
 

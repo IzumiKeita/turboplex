@@ -138,6 +138,7 @@ def build_kwargs_for_callable(
     *,
     skip_self: bool,
     parametrize_kwargs: dict[str, Any] | None = None,
+    fixture_sources: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Build keyword args for *fn* from registered fixtures (function-scope, one shot)."""
     fixtures = _fixtures_map(mod)
@@ -172,6 +173,8 @@ def build_kwargs_for_callable(
 
             if pname in fixtures:
                 kwargs[pname] = _resolve_one(mod, fixtures, pname, cache, stack)
+                if fixture_sources is not None:
+                    fixture_sources[pname] = "native"
             elif p.default is inspect.Parameter.empty:
                 raise RuntimeError(
                     f"parameter {pname!r} has no @fixture and no default"

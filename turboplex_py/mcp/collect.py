@@ -6,8 +6,9 @@ import sys
 import tempfile
 import time
 
+from .config import load_mcp_config
 from .errors import ToolSubprocessError
-from .subprocess import subprocess_env, env_timeout_s, run_popen_with_drain_and_heartbeat
+from .subprocess import subprocess_env, run_popen_with_drain_and_heartbeat
 from .utils import resolve_python_executable
 
 
@@ -98,7 +99,8 @@ def turboplex_collect(paths):
             "--out-json",
             out_path,
         ]
-        timeout_s = float(os.environ.get("TPX_MCP_TURBOPLEX_COLLECT_TIMEOUT_S", "120"))
+        cfg = load_mcp_config()
+        timeout_s = cfg.turboplex_collect_timeout_s
         rc, stdout, stderr = run_popen_with_drain_and_heartbeat(
             cmd,
             phase="turboplex_collect",
@@ -141,7 +143,8 @@ def turboplex_run_one(path: str, qual: str):
             "--out-json",
             out_path,
         ]
-        timeout_s = float(os.environ.get("TPX_MCP_TURBOPLEX_RUN_TIMEOUT_S", "60"))
+        cfg = load_mcp_config()
+        timeout_s = cfg.turboplex_run_timeout_s
         rc, stdout, stderr = run_popen_with_drain_and_heartbeat(
             cmd,
             phase="turboplex_run",
@@ -209,11 +212,8 @@ def pytest_collect(paths):
     base_cmd = [python_exe, "-m", "pytest", "--collect-only", "-q"]
     cmd = _build_pytest_cmd(base_cmd, paths)
     
-    timeout_s = env_timeout_s(
-        "TPX_MCP_PYTEST_COLLECT_TIMEOUT_S",
-        "TPX_PYTEST_COLLECT_TIMEOUT_S",
-        default=120.0,
-    )
+    cfg = load_mcp_config()
+    timeout_s = cfg.pytest_collect_timeout_s
     
     rc, stdout, stderr = _run_pytest_with_diagnostics(cmd, "pytest_collect", timeout_s)
     
@@ -235,11 +235,8 @@ def pytest_run(nodeid):
     base_cmd = [python_exe, "-m", "pytest", "-q", nodeid]
     cmd = _build_pytest_cmd(base_cmd)
     
-    timeout_s = env_timeout_s(
-        "TPX_MCP_PYTEST_RUN_TIMEOUT_S",
-        "TPX_PYTEST_RUN_TIMEOUT_S",
-        default=60.0,
-    )
+    cfg = load_mcp_config()
+    timeout_s = cfg.pytest_run_timeout_s
     
     try:
         rc, stdout, stderr = _run_pytest_with_diagnostics(cmd, "pytest_run", timeout_s)

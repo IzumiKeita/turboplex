@@ -1,7 +1,10 @@
 [package]
 name = "turboplex"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
+description = "High-performance test orchestration engine (Rust + Python)"
+license = "MIT"
+repository = "https://github.com/IzumiKeita/turboplex"
 
 [dependencies]
 rayon = "1.8"
@@ -28,3 +31,10 @@ path = "src/lib.rs"
 [[bin]]
 name = "tpx"
 path = "src/main.rs"
+
+[profile.release]
+opt-level = 3           # Maximum optimization
+lto = true              # Link-Time Optimization (slower build, faster runtime)
+codegen-units = 1       # Better optimization (single codegen unit)
+strip = true            # Strip debug symbols
+panic = 'abort'         # Faster panic handling

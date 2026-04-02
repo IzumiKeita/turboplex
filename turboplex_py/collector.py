@@ -183,7 +183,7 @@ def _load_module(path: pathlib.Path, timeout_s: float = 30.0, conftest_dir: str 
         conftest = parent / "conftest.py"
         if conftest.exists():
             try:
-                from .db_lazy_patcher import get_patcher
+                from .db.lazy_patcher import get_patcher
                 patcher = get_patcher()
                 patcher.patch_all()
                 logging.debug(f"Lazy patcher activated for {path} (found conftest at {conftest})")

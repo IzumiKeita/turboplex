@@ -1,0 +1,59 @@
+services:
+  db_tpx:
+    image: mariadb:10.11
+    container_name: tpx_mariadb_lab
+    environment:
+      - MYSQL_ROOT_PASSWORD=root
+      - MYSQL_DATABASE=turboplex_test
+      - MYSQL_USER=turboplex
+      - MYSQL_PASSWORD=turboplex
+    ports:
+      - "3306:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  tpx_tests:
+    image: rust:1.78-bookworm
+    container_name: tpx_runner_lab
+    working_dir: /workspace
+    depends_on:
+      db_tpx:
+        condition: service_healthy
+    environment:
+      - TPX_BENCH_DB=mariadb
+      - DATABASE_URL=mysql+pymysql://turboplex:turboplex@db_tpx:3306/turboplex_test
+      - PYTHONUTF8=1
+      - PYTHONIOENCODING=utf-8
+      - PYTHONUNBUFFERED=1
+      - PIP_DISABLE_PIP_VERSION_CHECK=1
+    volumes:
+      - .:/workspace
+      - cargo_registry:/usr/local/cargo/registry
+      - cargo_git:/usr/local/cargo/git
+      - tpx_venv:/opt/tpx_venv
+    entrypoint:
+      - bash
+      - -lc
+      - |
+        set -euo pipefail
+        apt-get update
+        apt-get install -y python3 python3-venv python3-pip
+        if [ ! -x "/opt/tpx_venv/bin/python" ]; then
+          python3 -m venv "/opt/tpx_venv"
+          "/opt/tpx_venv/bin/python" -m pip install -U pip
+          "/opt/tpx_venv/bin/pip" install pytest pytest-xdist sqlalchemy pymysql
+        fi
+        export PATH="/opt/tpx_venv/bin:/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        exec "$@"
+      - --
+    command: ["bash"]
+    stdin_open: true
+    tty: true
+
+volumes:
+  cargo_registry:
+  cargo_git:
+  tpx_venv:

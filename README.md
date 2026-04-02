@@ -186,10 +186,44 @@ Common MCP env vars:
 - `TPX_MCP_LIGHT_COLLECT=1`
 - `TPX_MCP_DEBUG=1`
 - `TPX_MCP_STDOUT_MODE=redirect|failfast`
+- `TPX_MCP_TEST_TIMEOUT_S` (default 120)
 - `TPX_MCP_TURBOPLEX_COLLECT_TIMEOUT_S` (default 120)
 - `TPX_MCP_TURBOPLEX_RUN_TIMEOUT_S` (default 60)
 - `TPX_MCP_PYTEST_COLLECT_TIMEOUT_S` / `TPX_PYTEST_COLLECT_TIMEOUT_S` (default 120)
 - `TPX_MCP_PYTEST_RUN_TIMEOUT_S` / `TPX_PYTEST_RUN_TIMEOUT_S` (default 60)
+- `TPX_MCP_HEARTBEAT_S` (default 1)
+- `TPX_MCP_TERMINATE_GRACE_S` (default 2)
+- `TPX_MCP_DRAIN_MAX_CHARS` (default 2000000)
+- `TPX_MCP_LOGS_MAX_CHARS` (default 20000)
+
+Error contract (`ok=false`):
+- `data.error.code` in `timeout | subprocess_failed | invalid_input | not_found | internal_error`
+- `data.error.message` is always human-readable
+- `data.error.details` may include `phase`, `returncode`, `timeout_s`, and truncated stderr/stdout metadata
+
+Tool response shape (`discover`, `run`, `get_report`):
+- top-level: `schemaVersion`, `tool`, `ok`, `runId`, `mode`, `summary`, `logs`, `data`
+- `run.summary` also includes `workers_used`, `timeouts`, `subprocess_failures`
+- DB-first additions:
+  - `data.results[].db_metrics.write_count`
+  - `data.results[].db_dirty`
+  - `data.results[].db_dirty_summary`
+  - `run.summary.db_write_count_total`
+  - `run.summary.db_dirty_tests`
+
+Integration coverage added today:
+- `tests/test_mcp_db_integration.py` validates MCP `run` DB metrics with SQLite writes.
+- strict dirty policy verified:
+  - `TPX_DB_STRICT_DIRTY=0` -> run can pass while reporting `db_dirty`.
+  - `TPX_DB_STRICT_DIRTY=1` -> run fails with `db_error.code=db_dirty_state`.
+- subprocess-only variant added with `xfail` guard on Windows for occasional native crash `0xC0000005` (Access Violation).
+
+DB hardening env vars:
+- `TPX_DB_STRICT_DIRTY=0|1` (default `0`, fail test only when dirty + strict enabled)
+- `TPX_DB_METRICS_ENABLED=0|1` (default `1`)
+- `TPX_DB_ISOLATION_MODE=auto|schema|database|transaction` (default `auto`)
+- `TPX_DB_WORKER_PREFIX=tpx_w`
+- `TPX_DB_DIRTY_TRACK_MAX_TABLES=12`
 
 Example MCP config:
 

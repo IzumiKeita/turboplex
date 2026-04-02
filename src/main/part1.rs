@@ -18,14 +18,17 @@ Usage:
     tpx mcp                  # Inicia el servidor MCP (stdio)
     tpx --path ./tests     # Run tests in specific directory
     tpx --watch            # Watch for file changes and re-run
-    tpx --compat           # Ejecuta los tests vía pytest (fixtures/conftest)
+    tpx --compat           # Ejecuta los tests vía pytest (fixtures/conftest) en modo sesión (batch)
+    tpx --compat-per-test  # Pytest por test (más lento, útil para debug)
     tpx --light            # Collect rápido sin cargar conftest.py (ideal para MCP/IDE)
     tpx --help            # Show this help
 
 Options:
     --path, -p <dir>    Run tests in specific directory
     --watch, -w         Watch for file changes and re-run
-    --compat            Delegar ejecución a pytest
+    --compat            Delegar ejecución a pytest (modo sesión / batch)
+    --compat-session    Alias de --compat
+    --compat-per-test   Pytest por test (legacy)
     --light             Modo light: collect sin conftest (rápido, sin DB setup)
     --quiet             Modo silencioso (solo fallos + resumen)
     --verbose           Modo detallado (línea por test)
@@ -57,10 +60,10 @@ Aliases:
 }
 
 pub(crate) fn run_mcp_server() -> i32 {
-    let env = build_runtime_python_env(false, "mcp=1");
+    let env = build_runtime_python_env(false, false, "mcp=1");
     let mut cmd = Command::new(&env.interpreter);
     cmd.current_dir(&env.cwd);
-    cmd.arg("-m").arg("turboplex_py.mcp_server");
+    cmd.arg("-m").arg("turboplex_py.mcp.server");
     cmd.env("PYTHONUNBUFFERED", "1");
     cmd.env("PYTHONIOENCODING", "utf-8");
     cmd.env("PYTHONUTF8", "1");
@@ -135,6 +138,7 @@ pub(crate) struct RuntimePythonEnv {
     pub(crate) pythonpath: Option<String>,
     pub(crate) fingerprint: String,
     pub(crate) compat: bool,
+    pub(crate) compat_session: bool,
 }
 
 fn is_root_marker_dir(dir: &Path) -> bool {
@@ -234,7 +238,11 @@ fn detect_deps_hash(root: &Path) -> Option<String> {
     None
 }
 
-pub(crate) fn build_runtime_python_env(compat: bool, extra_flags: &str) -> RuntimePythonEnv {
+pub(crate) fn build_runtime_python_env(
+    compat: bool,
+    compat_session: bool,
+    extra_flags: &str,
+) -> RuntimePythonEnv {
     let config_paths = [
         "turbo_config.toml",
         "../turbo_config.toml",
@@ -250,7 +258,7 @@ pub(crate) fn build_runtime_python_env(compat: bool, extra_flags: &str) -> Runti
 
     // Jerarquía de intérpretes: Variable > Config > .venv Autodetect > default
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    
+
     // 1. Primero: TPX_PYTHON_EXE (variable de entorno)
     let interpreter = std::env::var("TPX_PYTHON_EXE")
         .and_then(|path| {
@@ -263,25 +271,27 @@ pub(crate) fn build_runtime_python_env(compat: bool, extra_flags: &str) -> Runti
         })
         // 2. Segundo: py_cfg.interpreter (configuración)
         .or_else(|_| {
-            py_cfg.interpreter.as_ref().and_then(|path| {
-                if std::path::Path::new(path).exists() {
-                    eprintln!("Using config interpreter: {}", path);
-                    Some(path.clone())
-                } else {
-                    None
-                }
-            }).ok_or(std::env::VarError::NotPresent)
+            py_cfg
+                .interpreter
+                .as_ref()
+                .and_then(|path| {
+                    if std::path::Path::new(path).exists() {
+                        eprintln!("Using config interpreter: {}", path);
+                        Some(path.clone())
+                    } else {
+                        None
+                    }
+                })
+                .ok_or(std::env::VarError::NotPresent)
         })
         // 3. Tercero: .venv autodetect
-        .or_else(|_| {
-            find_venv_python(&cwd).ok_or(std::env::VarError::NotPresent)
-        })
+        .or_else(|_| find_venv_python(&cwd).ok_or(std::env::VarError::NotPresent))
         // 4. Default: "python"
         .unwrap_or_else(|_| {
             eprintln!("No specific Python found, using default: python");
             "python".to_string()
         });
-    
+
     let module = py_cfg
         .module
         .clone()
@@ -299,8 +309,8 @@ pub(crate) fn build_runtime_python_env(compat: bool, extra_flags: &str) -> Runti
     let deps = detect_deps_hash(&root).unwrap_or_else(|| "none".to_string());
     let pp = pythonpath.clone().unwrap_or_else(|| "none".to_string());
     let fingerprint_raw = format!(
-        "py={};deps={};pp={};compat={};flags={}",
-        pyver, deps, pp, compat, extra_flags
+        "py={};deps={};pp={};compat={};compat_session={};flags={}",
+        pyver, deps, pp, compat, compat_session, extra_flags
     );
     let fingerprint = compute_text_hash(&fingerprint_raw);
 
@@ -311,12 +321,13 @@ pub(crate) fn build_runtime_python_env(compat: bool, extra_flags: &str) -> Runti
         pythonpath,
         fingerprint,
         compat,
+        compat_session,
     }
 }
 
 fn find_venv_python(start_dir: &Path) -> Option<String> {
     let venv_names = [".venv", "venv", ".env", "env"];
-    
+
     // Check current dir and ancestors
     for dir in std::iter::once(start_dir).chain(start_dir.ancestors().take(4)) {
         for venv_name in &venv_names {
@@ -327,7 +338,7 @@ fn find_venv_python(start_dir: &Path) -> Option<String> {
                 } else {
                     venv_path.join("bin").join("python")
                 };
-                
+
                 if python_exe.exists() {
                     eprintln!("Found venv Python: {}", python_exe.display());
                     return Some(python_exe.to_string_lossy().to_string());
@@ -335,7 +346,7 @@ fn find_venv_python(start_dir: &Path) -> Option<String> {
             }
         }
     }
-    
+
     None
 }
 

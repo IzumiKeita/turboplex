@@ -9,6 +9,7 @@ use turboplex::{load_config, python_config_effective};
 mod output;
 mod part1;
 mod part2;
+mod pytest_compat;
 
 pub(crate) fn entry() {
     let args: Vec<String> = std::env::args().collect();
@@ -22,52 +23,62 @@ pub(crate) fn entry() {
     if args.iter().any(|a| a == "--analyze") {
         let report_path = std::path::PathBuf::from("turboplex_full_report.json");
         if !report_path.exists() {
-            eprintln!("Error: turboplex_full_report.json not found. Run tests first with --jsonl flag.");
+            eprintln!(
+                "Error: turboplex_full_report.json not found. Run tests first with --jsonl flag."
+            );
             std::process::exit(1);
         }
-        
+
         match turboplex::indexer::analyze_report(&report_path) {
             Ok(report) => {
                 // Imprimir resumen ejecutivo
                 println!("\n{}", "═".repeat(60).cyan().bold());
                 println!("{}", " TurboPlex Analysis Report ".cyan().bold());
                 println!("{}", "═".repeat(60).cyan().bold());
-                
+
                 println!("\n{}", "📊 Summary".bold());
                 println!("   Total:  {}", report.total_tests);
                 println!("   Passed: {}", report.passed.to_string().green());
                 println!("   Failed: {}", report.failed.to_string().red());
-                println!("   Rate:   {:.1}%", (report.passed as f64 / report.total_tests as f64) * 100.0);
-                
+                println!(
+                    "   Rate:   {:.1}%",
+                    (report.passed as f64 / report.total_tests as f64) * 100.0
+                );
+
                 if !report.critical_issues.is_empty() {
                     println!("\n{}", "🚨 Critical Issues".red().bold());
                     for issue in &report.critical_issues {
                         println!("   • {}", issue);
                     }
                 }
-                
+
                 println!("\n{}", "📋 Error Categories".bold());
                 for cat in &report.categories {
-                    let color = if cat.count > 20 { "red".to_string() } 
-                               else if cat.count > 5 { "yellow".to_string() } 
-                               else { "white".to_string() };
-                    println!("   [{}] {} - {}", 
+                    let color = if cat.count > 20 {
+                        "red".to_string()
+                    } else if cat.count > 5 {
+                        "yellow".to_string()
+                    } else {
+                        "white".to_string()
+                    };
+                    println!(
+                        "   [{}] {} - {}",
                         cat.count.to_string().color(color),
                         cat.category,
                         cat.pattern.dimmed()
                     );
                 }
-                
+
                 println!("\n{}", "💡 Top Recommendations".green().bold());
                 for (i, rec) in report.recommendations.iter().enumerate() {
                     println!("   {}. {}", i + 1, rec);
                 }
-                
+
                 // Opcional: Generar JSON del análisis para la IA
                 let analysis_json = serde_json::to_string_pretty(&report).unwrap();
                 println!("\n{}", "📄 Full Analysis JSON (for AI agents):".dimmed());
                 println!("{}", analysis_json);
-                
+
                 std::process::exit(0);
             }
             Err(e) => {
@@ -83,12 +94,14 @@ pub(crate) fn entry() {
 
     let mut test_paths: Vec<String> = Vec::new();
     let watch_mode = args.iter().any(|a| a == "--watch" || a == "-w");
-    let compat = args.iter().any(|a| a == "--compat");
+    let mut compat = false;
+    let mut compat_per_test = false;
     let light_mode = args.iter().any(|a| a == "--light");
     let mut quiet = false;
     let mut verbose = false;
     let mut json = false;
     let mut out_json: Option<String> = None;
+    let mut workers: Option<usize> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -97,14 +110,30 @@ pub(crate) fn entry() {
                 test_paths.push(args[i + 1].clone());
                 i += 2;
             }
-            "--out-json" if i + 1 < args.len() => {
+            "--out-json" | "--report-json" if i + 1 < args.len() => {
                 out_json = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--workers" | "-j" if i + 1 < args.len() => {
+                if let Ok(w) = args[i + 1].parse::<usize>() {
+                    workers = Some(w);
+                }
                 i += 2;
             }
             "--watch" | "-w" => {
                 i += 1;
             }
             "--compat" => {
+                compat = true;
+                i += 1;
+            }
+            "--compat-session" => {
+                compat = true;
+                i += 1;
+            }
+            "--compat-per-test" => {
+                compat = true;
+                compat_per_test = true;
                 i += 1;
             }
             "--light" => {
@@ -148,17 +177,30 @@ pub(crate) fn entry() {
     if mode == output::OutputMode::Verbose {
         println!("\n{}", "TurboTest Engine".bold().cyan());
     }
-    
-    // Set TPX_MCP_LIGHT_COLLECT if --light flag is used
+
+    // Set TPX_WORKERS if --workers flag is used
+    if let Some(w) = workers {
+        std::env::set_var("TPX_WORKERS", w.to_string());
+        if mode == output::OutputMode::Verbose {
+            println!("{} Workers: {}", "⚡".yellow(), w);
+        }
+    }
     if light_mode {
         std::env::set_var("TPX_MCP_LIGHT_COLLECT", "1");
         if mode == output::OutputMode::Verbose {
-            println!("{} Light collect mode enabled (skipping conftest.py)", "⚡".yellow());
+            println!(
+                "{} Light collect mode enabled (skipping conftest.py)",
+                "⚡".yellow()
+            );
         }
     }
-    
-    let runtime_env =
-        part1::build_runtime_python_env(compat, if watch_mode { "watch=1" } else { "watch=0" });
+
+    let compat_session = compat && !compat_per_test;
+    let runtime_env = part1::build_runtime_python_env(
+        compat,
+        compat_session,
+        if watch_mode { "watch=1" } else { "watch=0" },
+    );
 
     let config_paths = [
         "turbo_config.toml",

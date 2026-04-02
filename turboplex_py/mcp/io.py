@@ -3,6 +3,8 @@
 import json
 import sys
 
+from .config import load_mcp_config
+
 
 class StdoutJsonRpcGuard:
     """Guards stdout to ensure only JSON-RPC lines pass through."""
@@ -90,7 +92,8 @@ def tool_json(payload: dict) -> str:
 
 def attach_logs(payload: dict, captured_stdout: str, captured_stderr: str) -> None:
     """Attach captured logs to payload with truncation."""
-    max_chars = 20_000
+    cfg = load_mcp_config()
+    max_chars = cfg.logs_max_chars
     out = captured_stdout or ""
     err = captured_stderr or ""
     truncated = False

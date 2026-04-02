@@ -16,7 +16,7 @@ def install_sqlalchemy_patcher():
     """Instala el patcher de SQLAlchemy lo más temprano posible."""
     try:
         # Importar y activar el patcher
-        from .db_lazy_patcher import get_patcher
+        from ..db.lazy_patcher import get_patcher
         patcher = get_patcher()
         patcher.patch_all()
         logger.info("SQLAlchemy patcher instalado en bootstrap")

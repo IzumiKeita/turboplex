@@ -2,6 +2,7 @@
 
 Este módulo permite a TurboPlex ejecutar tests escritos para pytest,
 interceptando y adaptando automáticamente fixtures, hooks y plugins.
+Incluye soporte nativo para fixtures built-in de pytest (tmp_path, monkeypatch, capsys).
 """
 
 from __future__ import annotations
@@ -12,12 +13,136 @@ import inspect
 import os
 import pathlib
 import sys
+import tempfile
+import io
 from dataclasses import dataclass, field
-from typing import Any, Callable, Generator, Optional, Dict, List, Set
+from typing import Any, Callable, Generator, Optional, Dict, List, Set, TextIO
 import logging
 
 # Configurar logging
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Built-in Fixtures Implementation
+# =============================================================================
+
+class Monkeypatch:
+    """Implementación de monkeypatch fixture de pytest."""
+    
+    def __init__(self):
+        self._env_before: Dict[str, Optional[str]] = {}
+        self._attr_before: List[tuple] = []
+        self._cwd_before: Optional[str] = None
+    
+    def setenv(self, name: str, value: str, prepend: Optional[str] = None):
+        """Set environment variable."""
+        if name not in self._env_before:
+            self._env_before[name] = os.environ.get(name)
+        if prepend is not None:
+            value = prepend + value
+        os.environ[name] = value
+    
+    def delenv(self, name: str, raising: bool = True):
+        """Delete environment variable."""
+        if name not in self._env_before:
+            self._env_before[name] = os.environ.get(name)
+        if raising and name not in os.environ:
+            raise KeyError(name)
+        os.environ.pop(name, None)
+    
+    def setattr(self, target: Any, name: str, value: Any, raising: bool = True):
+        """Set attribute on target."""
+        old_value = getattr(target, name, None)
+        self._attr_before.append((target, name, old_value))
+        setattr(target, name, value)
+    
+    def delattr(self, target: Any, name: str, raising: bool = True):
+        """Delete attribute from target."""
+        old_value = getattr(target, name, None)
+        self._attr_before.append((target, name, old_value))
+        if raising and not hasattr(target, name):
+            raise AttributeError(name)
+        delattr(target, name)
+    
+    def chdir(self, path: str):
+        """Change current working directory."""
+        if self._cwd_before is None:
+            self._cwd_before = os.getcwd()
+        os.chdir(path)
+    
+    def undo(self):
+        """Undo all monkeypatched changes."""
+        # Restore environment variables
+        for name, value in self._env_before.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        self._env_before.clear()
+        
+        # Restore attributes
+        for target, name, value in reversed(self._attr_before):
+            try:
+                setattr(target, name, value)
+            except Exception:
+                pass
+        self._attr_before.clear()
+        
+        # Restore working directory
+        if self._cwd_before is not None:
+            os.chdir(self._cwd_before)
+            self._cwd_before = None
+
+
+class CapturedIO:
+    """Objecto para capturar stdout/stderr."""
+    
+    def __init__(self, stdout: str, stderr: str):
+        self.out = stdout
+        self.err = stderr
+        self.stdout = stdout
+        self.stderr = stderr
+    
+    def __repr__(self):
+        return f"CapturedIO(out={self.out!r}, err={self.err!r})"
+
+
+class CapsysFixture:
+    """Implementación de capsys fixture de pytest."""
+    
+    def __init__(self):
+        self._stdout_buffer = io.StringIO()
+        self._stderr_buffer = io.StringIO()
+        self._original_stdout = sys.stdout
+        self._original_stderr = sys.stderr
+    
+    def _start_capture(self):
+        """Start capturing stdout/stderr."""
+        sys.stdout = self._stdout_buffer
+        sys.stderr = self._stderr_buffer
+    
+    def _stop_capture(self) -> CapturedIO:
+        """Stop capturing and return captured output."""
+        sys.stdout = self._original_stdout
+        sys.stderr = self._original_stderr
+        
+        stdout = self._stdout_buffer.getvalue()
+        stderr = self._stderr_buffer.getvalue()
+        
+        return CapturedIO(stdout, stderr)
+    
+    def readouterr(self) -> CapturedIO:
+        """Read captured output."""
+        return CapturedIO(
+            self._stdout_buffer.getvalue(),
+            self._stderr_buffer.getvalue()
+        )
+    
+    def _finalize(self):
+        """Restore original stdout/stderr."""
+        sys.stdout = self._original_stdout
+        sys.stderr = self._original_stderr
 
 
 @dataclass
@@ -155,6 +280,9 @@ class FixtureManager:
 class PytestBridge:
     """Bridge principal que adapta pytest a TurboPlex."""
     
+    # Built-in fixtures nativos que TurboPlex provee
+    BUILTIN_FIXTURES = {'tmp_path', 'monkeypatch', 'capsys'}
+    
     def __init__(self, conftest_path: Optional[str] = None):
         self.conftest_path = conftest_path
         self.fixture_manager = FixtureManager()
@@ -164,6 +292,9 @@ class PytestBridge:
         
         # Cache de fixtures resueltos
         self._fixture_values: Dict[str, Any] = {}
+        
+        # Track de fixtures built-in que necesitan cleanup
+        self._builtin_fixtures_to_cleanup: Set[str] = set()
     
     def find_conftest(self, test_path: str) -> Optional[str]:
         """Busca el conftest.py más cercano al test."""
@@ -242,7 +373,7 @@ class PytestBridge:
         print(f"[BRIDGE DEBUG] Intentando cargar conftest desde: {self.conftest_path}", flush=True)
         
         # Activar lazy patcher antes de cargar
-        from .db_lazy_patcher import get_patcher
+        from ..db.lazy_patcher import get_patcher
         patcher = get_patcher()
         patcher.patch_all()
         
@@ -369,10 +500,21 @@ class PytestBridge:
         return hooks
     
     def get_fixture_value(self, name: str) -> Any:
-        """Obtiene el valor de un fixture (resolviendo dependencias)."""
+        """Obtiene el valor de un fixture (resolviendo dependencias).
+        
+        Soporta fixtures de conftest.py y fixtures built-in de pytest
+        (tmp_path, monkeypatch, capsys) generados nativamente por TurboPlex.
+        """
         # Verificar cache
         if name in self._fixture_values:
             return self._fixture_values[name]
+        
+        # Verificar si es un fixture built-in nativo
+        if name in self.BUILTIN_FIXTURES:
+            value = self._create_builtin_fixture(name)
+            self._fixture_values[name] = value
+            self._builtin_fixtures_to_cleanup.add(name)
+            return value
         
         # Cargar conftest completo si es necesario
         if not self._conftest_module:
@@ -390,6 +532,29 @@ class PytestBridge:
             raise RuntimeError(f"Fixture {name} no encontrado en conftest")
         
         fixture_func = getattr(self._conftest_module, name)
+        
+        # FIX: Detectar y extraer función subyacente de fixtures pytest
+        # Los fixtures @pytest.fixture están envueltos y no pueden llamarse directamente
+        actual_func = fixture_func
+        fixture_type = type(fixture_func)
+        
+        # Caso 1: FixtureFunctionDefinition de pytest (tiene _fixture_function)
+        if hasattr(fixture_func, '_fixture_function'):
+            actual_func = fixture_func._fixture_function
+        # Caso 2: _pytestfixturefunction marker
+        elif hasattr(fixture_func, '_pytestfixturefunction'):
+            import inspect
+            try:
+                unwrapped = inspect.unwrap(fixture_func)
+                if callable(unwrapped) and unwrapped is not fixture_func:
+                    actual_func = unwrapped
+            except Exception:
+                if hasattr(fixture_func, '__wrapped__'):
+                    actual_func = fixture_func.__wrapped__
+                elif hasattr(fixture_func, 'func'):
+                    actual_func = fixture_func.func
+        
+        fixture_func = actual_func
         
         # Resolver dependencias recursivamente
         fixture_info = self.fixture_manager.get(name)
@@ -412,6 +577,29 @@ class PytestBridge:
         self._fixture_values[name] = value
         return value
     
+    def _create_builtin_fixture(self, name: str) -> Any:
+        """Crea un fixture built-in nativo de pytest.
+        
+        Implementa tmp_path, monkeypatch, y capsys sin depender de conftest.py.
+        """
+        if name == 'tmp_path':
+            # Crear directorio temporal único para el test
+            tmp_dir = tempfile.mkdtemp(prefix='tpx_tmp_')
+            return pathlib.Path(tmp_dir)
+        
+        elif name == 'monkeypatch':
+            # Crear instancia de Monkeypatch
+            return Monkeypatch()
+        
+        elif name == 'capsys':
+            # Crear instancia de CapsysFixture y empezar captura
+            capsys = CapsysFixture()
+            capsys._start_capture()
+            return capsys
+        
+        else:
+            raise RuntimeError(f"Fixture built-in {name} no implementado")
+    
     def _is_db_fixture(self, name: str) -> bool:
         """Detecta si un fixture es de base de datos."""
         db_fixture_names = {'db', 'session', 'engine', 'connection', 'client', 'async_client'}
@@ -427,7 +615,25 @@ class PytestBridge:
                 self._db_patcher.unpatch_all()
     
     def cleanup_fixture(self, name: str):
-        """Limpia un fixture (ejecuta teardown si es generador)."""
+        """Limpia un fixture (ejecuta teardown si es generador o built-in)."""
+        # Manejar cleanup de fixtures built-in
+        if name in self._builtin_fixtures_to_cleanup and name in self._fixture_values:
+            value = self._fixture_values[name]
+            
+            if name == 'monkeypatch' and isinstance(value, Monkeypatch):
+                # Undo all monkeypatched changes
+                value.undo()
+            elif name == 'capsys' and isinstance(value, CapsysFixture):
+                # Restore stdout/stderr
+                value._finalize()
+            elif name == 'tmp_path':
+                # Opcional: limpiar directorio temporal
+                # Nota: Por defecto no eliminamos para debugging
+                pass
+            
+            self._builtin_fixtures_to_cleanup.discard(name)
+        
+        # Manejar cleanup de fixtures de conftest (generadores)
         if name in self.fixture_manager._active_generators:
             gen = self.fixture_manager._active_generators.pop(name)
             try:

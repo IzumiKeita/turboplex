@@ -61,8 +61,75 @@ out/
 .svelte-kit/
 coverage/
 
+#.turboplex_cache/
+#.tplex_report.json
+#*.tplex_report.json
 .turboplex_cache/
-.tplex_report.json
+
+# Benchmark results and logs (exclude from git)
+.benchmarks/results/*.json
+.benchmarks/logs/*.log
+.benchmarks/logs/*.md
+
+# Keep benchmark scripts (include in git)
+!.benchmarks/scripts/*.py
+!.benchmarks/README.md
+
+# Temporary benchmark files (root)
 *.tplex_report.json
+.tplex_report.json
+latest_failures.md
+a.md
 
 /publish.bat
+/publish_preflight.ps1
+
+# Internal/private docs and notes
+.Documentacion/
+
+# Local preflight / packaging scratch
+.preflight_venv/
+
+# Local databases, dumps, and snapshots
+*.sqlite
+*.sqlite3
+*.db
+*.sql
+*.dump
+*.bak.sql
+
+# Runtime outputs and ad-hoc reports
+result*.json
+*_results.json
+failures_*.md
+pytest_batch_out.json
+nodeids.json
+/*_result*.json
+/*_results*.json
+/compat_pure.json
+/latest_failures.md
+/a.md
+/analyze_results.py
+/analyze_v2.py
+/analyze_v3.py
+
+# Keys/certs/sensitive local material
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_rsa.pub
+*.secrets.*
+
+# Conservative local tooling/env files
+.envrc
+.python-version
+.tool-versions
+*.local.*
+
+lib/
+test/
+.benchmarks/
+bin/
+tests/

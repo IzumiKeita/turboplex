@@ -32,7 +32,7 @@ fn temp_json_path(prefix: &str) -> PathBuf {
 fn discover_venv_python(project_root: &Path) -> Option<String> {
     // Check for .venv or venv in project root
     let venv_paths = [".venv", "venv", ".env", "env"];
-    
+
     for venv_name in &venv_paths {
         let venv_path = project_root.join(venv_name);
         if venv_path.exists() && venv_path.is_dir() {
@@ -42,13 +42,13 @@ fn discover_venv_python(project_root: &Path) -> Option<String> {
             } else {
                 venv_path.join("bin").join("python")
             };
-            
+
             if python_exe.exists() {
                 return Some(python_exe.to_string_lossy().to_string());
             }
         }
     }
-    
+
     None
 }
 
@@ -57,13 +57,13 @@ fn get_effective_python_interpreter(interpreter: &str, project_path: Option<&Pat
     if interpreter != "python" {
         return interpreter.to_string();
     }
-    
+
     // Try to find venv Python in project path
     if let Some(proj) = project_path {
         if let Some(venv_python) = discover_venv_python(proj) {
             return venv_python;
         }
-        
+
         // Also check parent directories for venv
         for parent in proj.ancestors().take(3) {
             if let Some(venv_python) = discover_venv_python(parent) {
@@ -71,7 +71,7 @@ fn get_effective_python_interpreter(interpreter: &str, project_path: Option<&Pat
             }
         }
     }
-    
+
     // Check PYTHON_HOME env var (Windows)
     if cfg!(windows) {
         if let Ok(python_home) = std::env::var("PYTHON_HOME") {
@@ -81,7 +81,7 @@ fn get_effective_python_interpreter(interpreter: &str, project_path: Option<&Pat
             }
         }
     }
-    
+
     // Fall back to the provided interpreter
     interpreter.to_string()
 }
@@ -243,7 +243,9 @@ pub fn collect_python_tests(cfg: &TurboConfig) -> Result<Vec<PythonCollectedItem
 
     // Determine project path from test paths (convert to absolute if needed)
     let current_dir = std::env::current_dir().ok();
-    let project_path = py.test_paths.first()
+    let project_path = py
+        .test_paths
+        .first()
         .and_then(|p| {
             let path = Path::new(p);
             // Convert to absolute path if relative
@@ -254,10 +256,16 @@ pub fn collect_python_tests(cfg: &TurboConfig) -> Result<Vec<PythonCollectedItem
             };
             abs_path.parent().map(|p| p.to_path_buf())
         })
-        .or_else(|| py.project_path.as_ref().map(Path::new).map(|p| p.to_path_buf()));
+        .or_else(|| {
+            py.project_path
+                .as_ref()
+                .map(Path::new)
+                .map(|p| p.to_path_buf())
+        });
 
     // Get effective interpreter with venv detection
-    let actual_interpreter = get_effective_python_interpreter(&interpreter, project_path.as_deref());
+    let actual_interpreter =
+        get_effective_python_interpreter(&interpreter, project_path.as_deref());
 
     let mut cmd = Command::new(&actual_interpreter);
     cmd.arg("-m");
@@ -325,14 +333,17 @@ pub(crate) fn run_python_item_fixed(
     if cfg.execution.cache_enabled {
         if let Some(cached) = check_cache(cache_dir, &source, &cache_key) {
             let _ = progress.lock().map(|pb| pb.inc(1));
-            return (TestResult {
-                test_name: label,
-                passed: cached.passed,
-                cached: true,
-                duration_ms: cached.duration_ms,
-                error: cached.error,
-                enriched_data: None, // Cache no tiene datos enriquecidos
-            }, None);
+            return (
+                TestResult {
+                    test_name: label,
+                    passed: cached.passed,
+                    cached: true,
+                    duration_ms: cached.duration_ms,
+                    error: cached.error,
+                    enriched_data: Some(serde_json::json!({"fixture_source": "cached"})),
+                },
+                None,
+            );
         }
     }
 
@@ -368,14 +379,17 @@ pub(crate) fn run_python_item_fixed(
         Err(e) => {
             eprintln!("[DEBUG] Process execution failed: {}", e);
             let _ = progress.lock().map(|pb| pb.inc(1));
-            return (TestResult {
-                test_name: label.clone(),
-                passed: false,
-                cached: false,
-                duration_ms: start.elapsed().as_millis() as u64,
-                error: Some(format!("Process execution failed: {}", e)),
-                enriched_data: None,
-            }, None);
+            return (
+                TestResult {
+                    test_name: label.clone(),
+                    passed: false,
+                    cached: false,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    error: Some(format!("Process execution failed: {}", e)),
+                    enriched_data: None,
+                },
+                None,
+            );
         }
     };
     let duration_ms = start.elapsed().as_millis() as u64;
@@ -383,15 +397,21 @@ pub(crate) fn run_python_item_fixed(
     // DEBUG: Log process results
     eprintln!("[DEBUG] Process exited with status: {:?}", captured.status);
     eprintln!("[DEBUG] Timed out: {}", captured.timed_out);
-    
+
     let stdout_preview = String::from_utf8_lossy(&captured.stdout);
     let stderr_preview = String::from_utf8_lossy(&captured.stderr);
-    eprintln!("[DEBUG] stdout preview (first 500 chars): {}", &stdout_preview[..stdout_preview.len().min(500)]);
-    eprintln!("[DEBUG] stderr preview (first 500 chars): {}", &stderr_preview[..stderr_preview.len().min(500)]);
+    eprintln!(
+        "[DEBUG] stdout preview (first 500 chars): {}",
+        &stdout_preview[..stdout_preview.len().min(500)]
+    );
+    eprintln!(
+        "[DEBUG] stderr preview (first 500 chars): {}",
+        &stderr_preview[..stderr_preview.len().min(500)]
+    );
 
     let file_text = fs::read_to_string(&out_json_path).ok();
     let _ = fs::remove_file(&out_json_path);
-    
+
     // Variable to store raw JSON for report generation
     let mut json_raw: Option<serde_json::Value> = None;
 
@@ -409,22 +429,32 @@ pub(crate) fn run_python_item_fixed(
             Some(j) => {
                 // Keep the raw JSON for report generation
                 json_raw = Some(serde_json::to_value(&j).unwrap_or(serde_json::Value::Null));
-                
+
                 // Extract error from either new error_context or legacy error field
                 let error_msg = if let Some(ref ctx) = j.error_context {
                     // Build enriched error message from error_context
                     let mut parts = vec![
                         format!("{}: {}", ctx.error_type, ctx.message),
-                        format!("Location: {}:{}", 
-                            ctx.traceback.first().map(|f| f.file.clone()).unwrap_or_default(),
-                            ctx.traceback.first().map(|f| f.line).unwrap_or(0)),
+                        format!(
+                            "Location: {}:{}",
+                            ctx.traceback
+                                .first()
+                                .map(|f| f.file.clone())
+                                .unwrap_or_default(),
+                            ctx.traceback.first().map(|f| f.line).unwrap_or(0)
+                        ),
                     ];
                     if let Some(ref diff) = ctx.diff {
-                        parts.push(format!("Expected: {:?}, Got: {:?}", diff.expected, diff.actual));
+                        parts.push(format!(
+                            "Expected: {:?}, Got: {:?}",
+                            diff.expected, diff.actual
+                        ));
                     }
                     // Add first frame snippet
                     if let Some(first_frame) = ctx.traceback.first() {
-                        let snippet_preview: Vec<String> = first_frame.snippet.iter()
+                        let snippet_preview: Vec<String> = first_frame
+                            .snippet
+                            .iter()
                             .filter(|s| s.contains(">"))
                             .cloned()
                             .collect();
@@ -436,7 +466,7 @@ pub(crate) fn run_python_item_fixed(
                 } else {
                     j.error
                 };
-                
+
                 TestResult {
                     test_name: label.clone(),
                     passed: j.passed && captured.status == Some(0),
@@ -451,7 +481,7 @@ pub(crate) fn run_python_item_fixed(
                     }),
                     enriched_data: json_raw.clone(),
                 }
-            },
+            }
             None => {
                 let stdout = String::from_utf8_lossy(&captured.stdout).trim().to_string();
                 TestResult {
