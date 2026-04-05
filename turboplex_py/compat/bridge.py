@@ -18,6 +18,7 @@ import io
 from dataclasses import dataclass, field
 from typing import Any, Callable, Generator, Optional, Dict, List, Set, TextIO
 import logging
+import time
 
 # Configurar logging
 logger = logging.getLogger(__name__)
@@ -354,6 +355,9 @@ class PytestBridge:
     
     def load_conftest_full(self) -> bool:
         """Carga el conftest.py completo (con ejecución de código)."""
+        import time
+        start = time.perf_counter()
+        
         print(f"[BRIDGE DEBUG] load_conftest_full() llamado", flush=True)
         print(f"[BRIDGE DEBUG] conftest_path: {self.conftest_path}", flush=True)
         print(f"[BRIDGE DEBUG] _conftest_module: {self._conftest_module}", flush=True)
@@ -396,8 +400,29 @@ class PytestBridge:
                 if hasattr(module, hook_name):
                     self.hook_manager.register(hook_name, getattr(module, hook_name))
             
-            logger.info(f"Conftest cargado completamente (con lazy patcher): {self.conftest_path}")
-            logger.info(f"  - Operaciones DDL aplazadas: {patcher.get_pending_count()}")
+            # TURBO_GUIDE: Measure time and suggest lazy imports if slow
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            logger.info(f"Conftest loaded completely (with lazy patcher): {self.conftest_path}")
+            logger.info(f"  - Pending DDL operations: {patcher.get_pending_count()}")
+            
+            if elapsed_ms > 1000:  # 1 second threshold
+                print(f"\n⚠️  TURBO_GUIDE: conftest.py loaded in {elapsed_ms:.0f}ms (slow profile)", flush=True)
+                print(f"   The file {self.conftest_path} has heavy imports slowing down discovery.", flush=True)
+                print(f"   💡 Tip: Use 'lazy imports' to speed up:", flush=True)
+                print(f"", flush=True)
+                print(f"      # BEFORE (slow):", flush=True)
+                print(f"      from myapp.database import db  # Executes on import", flush=True)
+                print(f"", flush=True)
+                print(f"      # AFTER (fast):", flush=True)
+                print(f"      import os", flush=True)
+                print(f"      if os.getenv('TURBOPLEX_MODE'):", flush=True)
+                print(f"          pass  # TurboPlex mode - deferred imports", flush=True)
+                print(f"      else:", flush=True)
+                print(f"          from myapp.database import db", flush=True)
+                print(f"", flush=True)
+                print(f"   Or use: tpx --light --path tests/  (skips heavy conftest.py)", flush=True)
+                print(f"   Documentation: TURBOPLEX_GUIDE.md section 'Hybrid conftest.py'\n", flush=True)
+            
             return True
             
         except Exception as e:

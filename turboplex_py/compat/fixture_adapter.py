@@ -183,10 +183,18 @@ class FixtureAdapter:
 class FixtureInjector:
     """Inyecta fixtures de pytest en funciones de test."""
     
+    # Built-in fixtures de pytest NO soportados nativamente (requieren --compat)
+    UNSUPPORTED_BUILTINS = {
+        'capfd', 'capsysbinary', 'monkeypatch_session',
+        'tmp_path_factory', 'tmp_dir_factory', 'cache', 'record_property',
+        'recwarn', 'caplog_session', 'request', 'pytestconfig'
+    }
+    
     def __init__(self, bridge: PytestBridge):
         self.bridge = bridge
         self.adapter = FixtureAdapter(bridge)
         self._module_fixture_values: Dict[str, Any] = {}
+        self._resolving_tt: set[str] = set()
     
     def _get_protected_args(self, test_func: Callable) -> set:
         """Detecta argumentos ya cubiertos por decoradores de pytest/mock."""
@@ -297,61 +305,123 @@ class FixtureInjector:
         
         return False
     
-    def _resolve_fixture(self, name: str) -> Any:
-        """Resuelve un fixture por nombre."""
+    def _resolve_fixture(self, name: str, test_path: str = "") -> Any:
+        """Resuelve un fixture por nombre con diagnóstico mejorado."""
         import inspect
         
-        # Built-in fixtures nativos de TurboPlex
+        # Check for unsupported built-in fixture
+        if name in self.UNSUPPORTED_BUILTINS:
+            raise RuntimeError(
+                f"\n🔧 TURBO_FIX: Fixture '{name}' is a pytest built-in not natively supported.\n"
+                f"   This fixture requires full pytest compatibility mode.\n"
+                f"\n   💡 QUICK FIX:\n"
+                f"      tpx --compat --path {test_path or 'tests/'}\n"
+                f"\n   📚 Documentation: TURBOPLEX_GUIDE.md section 'Compatibility Mode'\n"
+            )
+        
+        # Native TurboPlex built-in fixtures
         if name in self.bridge.BUILTIN_FIXTURES:
             return self.bridge.get_fixture_value(name)
         
-        # caplog: crear LogCaptureHandler para capturar logs
+        # caplog: create LogCaptureHandler to capture logs
         if name == 'caplog':
             handler = LogCaptureHandler()
             logging.getLogger().addHandler(handler)
             return handler
         
-        # Primero buscar en valores del módulo (fixtures definidos en el test file)
+        # First search in module values (fixtures defined in test file)
         if name in self._module_fixture_values:
             return self._module_fixture_values[name]
         
-        # Si es un fixture de TurboPlex en el conftest, ejecutarlo correctamente
+        # If it's a TurboPlex fixture in conftest, execute it correctly
         if self.bridge._conftest_module:
-            # Verificar en el registro __tt_fixtures__
+            # Check in __tt_fixtures__ registry
             tt_fixtures = getattr(self.bridge._conftest_module, '__tt_fixtures__', {})
             if isinstance(tt_fixtures, dict) and name in tt_fixtures:
-                fix_fn = tt_fixtures[name]
-                if inspect.isgeneratorfunction(fix_fn):
-                    # Es un generador - ejecutar y obtener el primer valor
-                    gen = fix_fn()
-                    try:
-                        value = next(gen)
-                        # Guardar el generador para cleanup posterior en el adapter
-                        self.adapter._active_generators[name] = gen
-                        return value
-                    except StopIteration:
-                        return None
-                else:
-                    # Función normal
-                    return fix_fn()
+                return self._call_tt_fixture(name, tt_fixtures[name])
             
-            # Verificar si es un atributo del módulo con marca _tt_fixture
+            # Check if it's a module attribute with _tt_fixture mark
             if hasattr(self.bridge._conftest_module, name):
                 obj = getattr(self.bridge._conftest_module, name)
                 if hasattr(obj, '_tt_fixture') and getattr(obj, '_tt_fixture'):
-                    if inspect.isgeneratorfunction(obj):
-                        gen = obj()
-                        try:
-                            value = next(gen)
-                            self.adapter._active_generators[name] = gen
-                            return value
-                        except StopIteration:
-                            return None
-                    else:
-                        return obj()
+                    return self._call_tt_fixture(name, obj)
         
-        # Si no, usar el bridge para obtener el valor (fixtures de pytest)
-        return self.bridge.get_fixture_value(name)
+        # If not found, provide detailed diagnosis
+        if not self.bridge._conftest_module:
+            # conftest.py exists but didn't load completely
+            if self.bridge.conftest_path:
+                raise RuntimeError(
+                    f"\n🔧 TURBO_FIX: Could not load conftest.py to resolve fixture '{name}'\n"
+                    f"   Location: {self.bridge.conftest_path}\n"
+                    f"\n   Possible causes:\n"
+                    f"   1. conftest.py has heavy imports that fail\n"
+                    f"   2. There's a syntax error in the file\n"
+                    f"\n   💡 SOLUTIONS:\n"
+                    f"   - Use lazy imports in conftest.py:\n"
+                    f"     import os\n"
+                    f"     if os.getenv('TURBOPLEX_MODE'): pass\n"
+                    f"     else: from myapp import db\n"
+                    f"   - Or use compat mode: tpx --compat --path {test_path or 'tests/'}\n"
+                )
+        
+        # If we get here, the fixture doesn't exist
+        available = list(self.bridge.fixture_manager.fixtures.keys())[:10]
+        suggestions = []
+        if available:
+            suggestions.append(f"   Available fixtures: {', '.join(available)}")
+        suggestions.append(f"   Use: tpx --compat --path {test_path or 'tests/'} for full compatibility")
+        
+        raise RuntimeError(
+            f"\n🔧 TURBO_FIX: Fixture '{name}' not found\n"
+            f"\n   {chr(10).join(suggestions)}\n"
+            f"\n   📚 Verify the fixture is defined in conftest.py\n"
+        )
+
+    def _call_tt_fixture(self, name: str, fn: Callable[..., Any], test_path: str = "") -> Any:
+        import inspect
+
+        if name in self._module_fixture_values:
+            return self._module_fixture_values[name]
+        if name in self._resolving_tt:
+            raise RuntimeError(
+                f"\n🔧 TURBO_FIX: Circular dependency detected in fixture '{name}'\n"
+                f"   Fixtures cannot depend circularly on each other.\n"
+                f"   Review the dependencies in your conftest.py\n"
+            )
+        self._resolving_tt.add(name)
+        try:
+            sig = inspect.signature(fn)
+            deps: Dict[str, Any] = {}
+            for pname, p in sig.parameters.items():
+                if p.kind != inspect.Parameter.POSITIONAL_OR_KEYWORD:
+                    raise RuntimeError(
+                        f"\n🔧 TURBO_FIX: Fixture '{name}' has an invalid parameter '{pname}'.\n"
+                        f"   Only positional or keyword parameters are allowed.\n"
+                        f"   *args or **kwargs parameters are not supported in fixtures.\n"
+                    )
+                if self._is_fixture(pname):
+                    deps[pname] = self._resolve_fixture(pname, test_path)
+                elif p.default is inspect.Parameter.empty:
+                    raise RuntimeError(
+                        f"\n🔧 TURBO_FIX: Fixture '{name}' requires '{pname}' which is not registered.\n"
+                        f"   Make sure '{pname}' is defined as a fixture before using it.\n"
+                        f"   Or define a default value: def {name}({pname}=None)\n"
+                    )
+
+            if inspect.isgeneratorfunction(fn):
+                gen = fn(**deps)
+                try:
+                    value = next(gen)
+                except StopIteration:
+                    value = None
+                self.adapter._active_generators[name] = gen
+            else:
+                value = fn(**deps)
+
+            self._module_fixture_values[name] = value
+            return value
+        finally:
+            self._resolving_tt.discard(name)
     
     def _cleanup_fixture(self, name: str):
         """Limpia un fixture después de usarlo."""

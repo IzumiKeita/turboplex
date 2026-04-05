@@ -15,6 +15,7 @@ from typing import Any, Optional
 from .emit import _emit_enhanced
 from .environment import _bootstrap_test_environment, _load_module
 from ..db.fixtures import begin_test_db_tracking, finalize_test_db_tracking
+from ..mcp.transactional import begin_test_transaction, end_test_transaction
 from .invocation import (
     _invoke_function,
     _invoke_method,
@@ -68,133 +69,144 @@ def run_test(path_str: str, qual: str) -> dict[str, Any]:
     
     t0 = time.perf_counter()
     begin_test_db_tracking()
+    begin_test_transaction()
+    should_flush_logs = False
     try:
-        mod = _load_module(path.resolve())
-    except Exception as e:
-        dt = int((time.perf_counter() - t0) * 1000)
-        traceback.print_exc(file=sys.stderr)
-        res = _emit_enhanced(False, dt, path_str, qual, error=e)
-        res.update(finalize_test_db_tracking())
-        return res
-    
-    # Obtener parametrize_info antes de ejecutar para incluir en el reporte
-    parametrize_info = None
-    try:
-        if "::" not in qual:
-            fn = getattr(mod, qual)
-            if parametrize_index is not None and inspect.isfunction(fn):
-                parametrize_info = _get_parametrize_info(fn, parametrize_index, str(path), qual)
-    except Exception:
-        pass
-    
-    try:
-        clear_last_fixture_source()
-        if "::" in qual:
-            cname, mname = qual.split("::", 1)
-            cls = getattr(mod, cname)
-            meth = getattr(cls, mname)
-            if not inspect.isfunction(meth):
-                raise RuntimeError(f"{qual!r} is not a plain instance method in v1")
-            _invoke_method(mod, cls, meth)
-        else:
-            fn = getattr(mod, qual)
-            if not inspect.isfunction(fn):
-                raise RuntimeError(f"{qual!r} is not a function")
-            _invoke_function(mod, fn, parametrize_index=parametrize_index)
-        fixture_source = get_last_fixture_source()
-    except _Skipped as sk:
-        dt = int((time.perf_counter() - t0) * 1000)
-        payload: dict[str, Any] = {"passed": True, "duration_ms": dt, "error": None, "skipped": True}
-        fixture_source = get_last_fixture_source()
-        if fixture_source:
-            payload["fixture_source"] = fixture_source
-        if sk.reason:
-            payload["skip_reason"] = sk.reason
-        payload.update(finalize_test_db_tracking())
-        return payload
-    except BaseException as e:
-        skip_exc = _get_pytest_skip_exception()
-        if skip_exc is not None and isinstance(e, skip_exc):
+        try:
+            mod = _load_module(path.resolve())
+        except Exception as e:
             dt = int((time.perf_counter() - t0) * 1000)
-            payload = {"passed": True, "duration_ms": dt, "error": None, "skipped": True}
+            traceback.print_exc(file=sys.stderr)
+            res = _emit_enhanced(False, dt, path_str, qual, error=e)
+            res.update(finalize_test_db_tracking())
+            should_flush_logs = True
+            return res
+
+        parametrize_info = None
+        try:
+            if "::" not in qual:
+                fn = getattr(mod, qual)
+                if parametrize_index is not None and inspect.isfunction(fn):
+                    parametrize_info = _get_parametrize_info(fn, parametrize_index, str(path), qual)
+        except Exception:
+            pass
+
+        try:
+            clear_last_fixture_source()
+            if "::" in qual:
+                cname, mname = qual.split("::", 1)
+                cls = getattr(mod, cname)
+                meth = getattr(cls, mname)
+                if not inspect.isfunction(meth):
+                    raise RuntimeError(f"{qual!r} is not a plain instance method in v1")
+                _invoke_method(mod, cls, meth)
+            else:
+                fn = getattr(mod, qual)
+                if not inspect.isfunction(fn):
+                    raise RuntimeError(f"{qual!r} is not a function")
+                _invoke_function(mod, fn, parametrize_index=parametrize_index)
+            fixture_source = get_last_fixture_source()
+        except _Skipped as sk:
+            dt = int((time.perf_counter() - t0) * 1000)
+            payload: dict[str, Any] = {"passed": True, "duration_ms": dt, "error": None, "skipped": True}
             fixture_source = get_last_fixture_source()
             if fixture_source:
                 payload["fixture_source"] = fixture_source
-            reason = getattr(e, "msg", None)
-            if not reason:
-                reason = getattr(e, "reason", None)
-            if not reason and getattr(e, "args", None):
-                try:
-                    reason = e.args[0]
-                except Exception:
-                    reason = None
-            if reason:
-                payload["skip_reason"] = str(reason)
+            if sk.reason:
+                payload["skip_reason"] = sk.reason
             payload.update(finalize_test_db_tracking())
             return payload
-        if e.__class__.__name__ == "Skipped" and e.__class__.__module__ == "_pytest.outcomes":
+        except BaseException as e:
+            skip_exc = _get_pytest_skip_exception()
+            if skip_exc is not None and isinstance(e, skip_exc):
+                dt = int((time.perf_counter() - t0) * 1000)
+                payload = {"passed": True, "duration_ms": dt, "error": None, "skipped": True}
+                fixture_source = get_last_fixture_source()
+                if fixture_source:
+                    payload["fixture_source"] = fixture_source
+                reason = getattr(e, "msg", None)
+                if not reason:
+                    reason = getattr(e, "reason", None)
+                if not reason and getattr(e, "args", None):
+                    try:
+                        reason = e.args[0]
+                    except Exception:
+                        reason = None
+                if reason:
+                    payload["skip_reason"] = str(reason)
+                payload.update(finalize_test_db_tracking())
+                return payload
+            if e.__class__.__name__ == "Skipped" and e.__class__.__module__ == "_pytest.outcomes":
+                dt = int((time.perf_counter() - t0) * 1000)
+                payload = {"passed": True, "duration_ms": dt, "error": None, "skipped": True}
+                fixture_source = get_last_fixture_source()
+                if fixture_source:
+                    payload["fixture_source"] = fixture_source
+                reason = getattr(e, "msg", None)
+                if reason:
+                    payload["skip_reason"] = str(reason)
+                payload.update(finalize_test_db_tracking())
+                return payload
+            if not isinstance(e, Exception):
+                raise
             dt = int((time.perf_counter() - t0) * 1000)
-            payload = {"passed": True, "duration_ms": dt, "error": None, "skipped": True}
-            fixture_source = get_last_fixture_source()
-            if fixture_source:
-                payload["fixture_source"] = fixture_source
-            reason = getattr(e, "msg", None)
-            if reason:
-                payload["skip_reason"] = str(reason)
-            payload.update(finalize_test_db_tracking())
-            return payload
-        if not isinstance(e, Exception):
-            raise
+            traceback.print_exc(file=sys.stderr)
+            res = _emit_enhanced(
+                False,
+                dt,
+                path_str,
+                original_qual,
+                error=e,
+                parametrize_info=parametrize_info,
+                fixture_source=get_last_fixture_source(),
+            )
+            res.update(finalize_test_db_tracking())
+            should_flush_logs = True
+            return res
+
         dt = int((time.perf_counter() - t0) * 1000)
-        traceback.print_exc(file=sys.stderr)
-        res = _emit_enhanced(
-            False,
+        result = _emit_enhanced(
+            True,
             dt,
             path_str,
             original_qual,
-            error=e,
             parametrize_info=parametrize_info,
-            fixture_source=get_last_fixture_source(),
+            fixture_source=fixture_source,
         )
-        res.update(finalize_test_db_tracking())
-        return res
-    
-    dt = int((time.perf_counter() - t0) * 1000)
-    result = _emit_enhanced(
-        True,
-        dt,
-        path_str,
-        original_qual,
-        parametrize_info=parametrize_info,
-        fixture_source=fixture_source,
-    )
-    db_info = finalize_test_db_tracking()
-    result.update(db_info)
-    if db_info.get("db_should_fail_on_dirty"):
-        result["passed"] = False
-        result["error"] = "Dirty DB state detected (TPX_DB_STRICT_DIRTY=1)"
-        result["db_error"] = {
-            "code": "db_dirty_state",
-            "vendor_code": None,
-            "message": "Dirty DB state detected (TPX_DB_STRICT_DIRTY=1)",
-            "details": db_info.get("db_dirty_summary"),
-        }
-    
-    # RSS monitoring: medir memoria al final
-    try:
-        import psutil
-        process = psutil.Process(os.getpid())
-        rss_end = process.memory_info().rss
-    except Exception:
-        pass
-    
-    # Agregar datos RSS al resultado si están disponibles
-    if rss_start is not None and rss_end is not None:
-        result["rss_start_bytes"] = rss_start
-        result["rss_end_bytes"] = rss_end
-        result["rss_delta_bytes"] = rss_end - rss_start
-    
-    return result
+        db_info = finalize_test_db_tracking()
+        result.update(db_info)
+        if db_info.get("db_should_fail_on_dirty"):
+            result["passed"] = False
+            result["error"] = "Dirty DB state detected (TPX_DB_STRICT_DIRTY=1)"
+            result["db_error"] = {
+                "code": "db_dirty_state",
+                "vendor_code": None,
+                "message": "Dirty DB state detected (TPX_DB_STRICT_DIRTY=1)",
+                "details": db_info.get("db_dirty_summary"),
+            }
+
+        try:
+            import psutil
+            process = psutil.Process(os.getpid())
+            rss_end = process.memory_info().rss
+        except Exception:
+            pass
+
+        if rss_start is not None and rss_end is not None:
+            result["rss_start_bytes"] = rss_start
+            result["rss_end_bytes"] = rss_end
+            result["rss_delta_bytes"] = rss_end - rss_start
+
+        return result
+    finally:
+        end_test_transaction()
+        if should_flush_logs:
+            try:
+                from ..mcp.utils import get_tplex_logger
+
+                get_tplex_logger().flush()
+            except Exception:
+                pass
 
 
 def run_test_batch(test_items: list[dict[str, str]]) -> list[dict[str, Any]]:
@@ -252,118 +264,131 @@ def run_single_test(path_str: str, qual: str) -> dict[str, Any]:
     
     t0 = time.perf_counter()
     begin_test_db_tracking()
+    begin_test_transaction()
+    should_flush_logs = False
     try:
-        mod = _load_module(path.resolve())
-    except Exception as e:
-        dt = int((time.perf_counter() - t0) * 1000)
-        traceback.print_exc(file=sys.stderr)
-        res = _emit_enhanced(False, dt, path_str, qual, error=e)
-        res.update(finalize_test_db_tracking())
-        return res
-    
-    # Obtener parametrize_info
-    parametrize_info = None
-    try:
-        if "::" not in qual:
-            fn = getattr(mod, qual)
-            if parametrize_index is not None and inspect.isfunction(fn):
-                parametrize_info = _get_parametrize_info(fn, parametrize_index, str(path), qual)
-    except Exception:
-        pass
-    
-    try:
-        clear_last_fixture_source()
-        if "::" in qual:
-            cname, mname = qual.split("::", 1)
-            cls = getattr(mod, cname)
-            meth = getattr(cls, mname)
-            if not inspect.isfunction(meth):
-                raise RuntimeError(f"{qual!r} is not a plain instance method in v1")
-            _invoke_method(mod, cls, meth)
-        else:
-            fn = getattr(mod, qual)
-            if not inspect.isfunction(fn):
-                raise RuntimeError(f"{qual!r} is not a function")
-            _invoke_function(mod, fn, parametrize_index=parametrize_index)
-        fixture_source = get_last_fixture_source()
-    except _Skipped as sk:
-        dt = int((time.perf_counter() - t0) * 1000)
-        payload: dict[str, Any] = {"passed": True, "duration_ms": dt, "error": None, "skipped": True}
-        fixture_source = get_last_fixture_source()
-        if fixture_source:
-            payload["fixture_source"] = fixture_source
-        if sk.reason:
-            payload["skip_reason"] = sk.reason
-        payload.update(finalize_test_db_tracking())
-        return payload
-    except BaseException as e:
-        skip_exc = _get_pytest_skip_exception()
-        if skip_exc is not None and isinstance(e, skip_exc):
+        try:
+            mod = _load_module(path.resolve())
+        except Exception as e:
             dt = int((time.perf_counter() - t0) * 1000)
-            payload = {"passed": True, "duration_ms": dt, "error": None, "skipped": True}
+            traceback.print_exc(file=sys.stderr)
+            res = _emit_enhanced(False, dt, path_str, qual, error=e)
+            res.update(finalize_test_db_tracking())
+            should_flush_logs = True
+            return res
+
+        parametrize_info = None
+        try:
+            if "::" not in qual:
+                fn = getattr(mod, qual)
+                if parametrize_index is not None and inspect.isfunction(fn):
+                    parametrize_info = _get_parametrize_info(fn, parametrize_index, str(path), qual)
+        except Exception:
+            pass
+
+        try:
+            clear_last_fixture_source()
+            if "::" in qual:
+                cname, mname = qual.split("::", 1)
+                cls = getattr(mod, cname)
+                meth = getattr(cls, mname)
+                if not inspect.isfunction(meth):
+                    raise RuntimeError(f"{qual!r} is not a plain instance method in v1")
+                _invoke_method(mod, cls, meth)
+            else:
+                fn = getattr(mod, qual)
+                if not inspect.isfunction(fn):
+                    raise RuntimeError(f"{qual!r} is not a function")
+                _invoke_function(mod, fn, parametrize_index=parametrize_index)
+            fixture_source = get_last_fixture_source()
+        except _Skipped as sk:
+            dt = int((time.perf_counter() - t0) * 1000)
+            payload: dict[str, Any] = {"passed": True, "duration_ms": dt, "error": None, "skipped": True}
             fixture_source = get_last_fixture_source()
             if fixture_source:
                 payload["fixture_source"] = fixture_source
-            reason = getattr(e, "msg", None)
-            if not reason:
-                reason = getattr(e, "reason", None)
-            if not reason and getattr(e, "args", None):
-                try:
-                    reason = e.args[0]
-                except Exception:
-                    pass
-            if reason:
-                payload["skip_reason"] = str(reason)
+            if sk.reason:
+                payload["skip_reason"] = sk.reason
             payload.update(finalize_test_db_tracking())
             return payload
-        if e.__class__.__name__ == "Skipped" and e.__class__.__module__ == "_pytest.outcomes":
+        except BaseException as e:
+            skip_exc = _get_pytest_skip_exception()
+            if skip_exc is not None and isinstance(e, skip_exc):
+                dt = int((time.perf_counter() - t0) * 1000)
+                payload = {"passed": True, "duration_ms": dt, "error": None, "skipped": True}
+                fixture_source = get_last_fixture_source()
+                if fixture_source:
+                    payload["fixture_source"] = fixture_source
+                reason = getattr(e, "msg", None)
+                if not reason:
+                    reason = getattr(e, "reason", None)
+                if not reason and getattr(e, "args", None):
+                    try:
+                        reason = e.args[0]
+                    except Exception:
+                        pass
+                if reason:
+                    payload["skip_reason"] = str(reason)
+                payload.update(finalize_test_db_tracking())
+                return payload
+            if e.__class__.__name__ == "Skipped" and e.__class__.__module__ == "_pytest.outcomes":
+                dt = int((time.perf_counter() - t0) * 1000)
+                payload = {"passed": True, "duration_ms": dt, "error": None, "skipped": True}
+                fixture_source = get_last_fixture_source()
+                if fixture_source:
+                    payload["fixture_source"] = fixture_source
+                reason = getattr(e, "msg", None)
+                if reason:
+                    payload["skip_reason"] = str(reason)
+                payload.update(finalize_test_db_tracking())
+                return payload
+            if not isinstance(e, Exception):
+                raise
             dt = int((time.perf_counter() - t0) * 1000)
-            payload = {"passed": True, "duration_ms": dt, "error": None, "skipped": True}
-            fixture_source = get_last_fixture_source()
-            if fixture_source:
-                payload["fixture_source"] = fixture_source
-            reason = getattr(e, "msg", None)
-            if reason:
-                payload["skip_reason"] = str(reason)
-            payload.update(finalize_test_db_tracking())
-            return payload
-        if not isinstance(e, Exception):
-            raise
+            traceback.print_exc(file=sys.stderr)
+            res = _emit_enhanced(
+                False,
+                dt,
+                path_str,
+                original_qual,
+                error=e,
+                parametrize_info=parametrize_info,
+                fixture_source=get_last_fixture_source(),
+            )
+            res.update(finalize_test_db_tracking())
+            should_flush_logs = True
+            return res
+
         dt = int((time.perf_counter() - t0) * 1000)
-        traceback.print_exc(file=sys.stderr)
-        res = _emit_enhanced(
-            False,
+        result = _emit_enhanced(
+            True,
             dt,
             path_str,
             original_qual,
-            error=e,
             parametrize_info=parametrize_info,
-            fixture_source=get_last_fixture_source(),
+            fixture_source=fixture_source,
         )
-        res.update(finalize_test_db_tracking())
-        return res
-    
-    dt = int((time.perf_counter() - t0) * 1000)
-    result = _emit_enhanced(
-        True,
-        dt,
-        path_str,
-        original_qual,
-        parametrize_info=parametrize_info,
-        fixture_source=fixture_source,
-    )
-    db_info = finalize_test_db_tracking()
-    result.update(db_info)
-    if db_info.get("db_should_fail_on_dirty"):
-        result["passed"] = False
-        result["error"] = "Dirty DB state detected (TPX_DB_STRICT_DIRTY=1)"
-        result["db_error"] = {
-            "code": "db_dirty_state",
-            "vendor_code": None,
-            "message": "Dirty DB state detected (TPX_DB_STRICT_DIRTY=1)",
-            "details": db_info.get("db_dirty_summary"),
-        }
-    return result
+        db_info = finalize_test_db_tracking()
+        result.update(db_info)
+        if db_info.get("db_should_fail_on_dirty"):
+            result["passed"] = False
+            result["error"] = "Dirty DB state detected (TPX_DB_STRICT_DIRTY=1)"
+            result["db_error"] = {
+                "code": "db_dirty_state",
+                "vendor_code": None,
+                "message": "Dirty DB state detected (TPX_DB_STRICT_DIRTY=1)",
+                "details": db_info.get("db_dirty_summary"),
+            }
+        return result
+    finally:
+        end_test_transaction()
+        if should_flush_logs:
+            try:
+                from ..mcp.utils import get_tplex_logger
+
+                get_tplex_logger().flush()
+            except Exception:
+                pass
 
 
 def run_main(path_str: str, qual: str, out_json: str | None = None) -> None:

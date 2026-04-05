@@ -99,8 +99,8 @@ def run_popen_with_drain_and_heartbeat(
     p = Popen(
         cmd,
         stdout=PIPE,
-        stderr=PIPE,
-        stdin=PIPE,  # Important: provide stdin to avoid hanging on input prompts
+        stderr=STDOUT,  # Merge stderr into stdout to prevent pipe blocking
+        stdin=PIPE,
         text=True,
         encoding="utf-8",
         errors="replace",

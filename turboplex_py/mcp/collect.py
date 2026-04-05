@@ -9,7 +9,16 @@ import time
 from .config import load_mcp_config
 from .errors import ToolSubprocessError
 from .subprocess import subprocess_env, run_popen_with_drain_and_heartbeat
-from .utils import resolve_python_executable
+from .utils import (
+    resolve_python_executable,
+    # Logging and Health Checks v0.3.6+
+    get_tplex_logger,
+    preflight_guard,
+    SchemaSyncError,
+    log_health_check,
+    log_schema_sync,
+    log_autopsy,
+)
 
 
 def _debug_log(msg: str) -> None:
@@ -69,10 +78,21 @@ def _run_pytest_with_diagnostics(cmd: list, phase: str, timeout_s: float) -> tup
         err_msg += f"\nCommand: {' '.join(cmd)}"
         
         # Check for common issues
-        if "no module named" in (stderr + stdout).lower():
+        output_combined = (stderr + stdout).lower()
+        if "no module named" in output_combined:
             err_msg += "\n[Hint] Missing Python module - check venv dependencies"
-        if "permission denied" in (stderr + stdout).lower():
+        if "permission denied" in output_combined:
             err_msg += "\n[Hint] Permission denied - check file permissions"
+        
+        # Fase 2.1: Detectar SyntaxError específicamente
+        if "syntaxerror" in output_combined or "invalid syntax" in output_combined:
+            err_msg += "\n[Error] SyntaxError detectado - hay un error de sintaxis en el código Python"
+            err_msg += "\n[Hint] Revisa los archivos de test por errores de sintaxis (falta :, indentación, etc.)"
+            # Extraer línea del error si está disponible
+            for line in (stderr + stdout).splitlines():
+                if "SyntaxError" in line or "File \"" in line:
+                    err_msg += f"\n  {line}"
+                    break
         
         _debug_log(f"{phase}: Error: {err_msg[:200]}...")
         raise ToolSubprocessError(
@@ -126,8 +146,82 @@ def turboplex_collect(paths):
             pass
 
 
+def turboplex_doctor(mode: str = "native", fail_on_warn: bool = False) -> dict:
+    cmd = [resolve_python_executable(), "-m", "turboplex_py", "--doctor", "--json"]
+    if mode == "pytest":
+        cmd.append("--compat")
+    elif mode == "unittest":
+        cmd.append("--unittest")
+    elif mode == "behave":
+        cmd.append("--behave")
+    elif mode != "native":
+        raise ValueError(f"unknown doctor mode: {mode!r}")
+
+    if fail_on_warn:
+        cmd.append("--fail-on-warn")
+
+    cfg = load_mcp_config()
+    timeout_s = float(min(cfg.test_timeout_s, 30.0))
+
+    rc, stdout, stderr = run_popen_with_drain_and_heartbeat(
+        cmd,
+        phase="doctor",
+        timeout_s=timeout_s,
+        cwd=os.getcwd(),
+        env=subprocess_env(),
+    )
+    if rc not in (0, 1):
+        raise ToolSubprocessError(
+            phase="doctor",
+            returncode=rc,
+            stderr=stderr,
+            stdout=stdout,
+        )
+    try:
+        payload = json.loads(stdout or "{}")
+    except Exception as e:
+        raise ToolSubprocessError(
+            phase="doctor",
+            returncode=rc,
+            stderr=f"doctor output is not valid JSON: {e}",
+            stdout=stdout,
+        )
+    return payload if isinstance(payload, dict) else {"report": payload}
+
+
 def turboplex_run_one(path: str, qual: str):
-    """Run a single test using turboplex runner."""
+    """Run a single test using turboplex runner.
+
+    v0.3.6+: Integra Flight Recorder logging, Health Checks SSG,
+    y Transactional Testing automático.
+    """
+    # Initialize Flight Recorder logging
+    logger = get_tplex_logger()
+    logger.info(f"turboplex_run_one started: {qual}", "RUNNER")
+
+    # Pre-flight Health Check con SSG
+    try:
+        report = preflight_guard(check_alembic=True)
+        log_health_check(report)
+        for check_name, check_data in report.checks.items():
+            if check_name == "alembic_sync":
+                log_schema_sync(check_data.get("details", {}))
+    except SchemaSyncError as e:
+        logger.error(f"SSG Freno de Mano activado: {e}", "RUNNER")
+        log_schema_sync({
+            "synced": False,
+            "error": str(e),
+            "note": "Ejecución abortada - DB desincronizada"
+        })
+        return {
+            "passed": False,
+            "error": str(e),
+            "code": "SCHEMA_SYNC_BLOCKED",
+            "hint": 'Ejecuta "alembic upgrade head" para sincronizar la base de datos'
+        }
+    except Exception as e:
+        logger.warning(f"Health check warning: {e}", "RUNNER")
+
     fd, out_path = tempfile.mkstemp(prefix="tpx_run_", suffix=".json")
     os.close(fd)
     try:
@@ -145,6 +239,9 @@ def turboplex_run_one(path: str, qual: str):
         ]
         cfg = load_mcp_config()
         timeout_s = cfg.turboplex_run_timeout_s
+
+        logger.debug(f"Executing: {' '.join(cmd)}", "RUNNER")
+
         rc, stdout, stderr = run_popen_with_drain_and_heartbeat(
             cmd,
             phase="turboplex_run",
@@ -153,19 +250,33 @@ def turboplex_run_one(path: str, qual: str):
             env=subprocess_env(),
         )
         if rc not in (0, 1):
+            error_msg = f"turboplex run failed (exit {rc})"
+            logger.error(error_msg, "RUNNER")
             raise ToolSubprocessError(
                 phase="turboplex_run",
                 returncode=rc,
-                stderr=stderr,
+                stderr=stderr or error_msg,
                 stdout=stdout,
             )
         with open(out_path, "r", encoding="utf-8", errors="replace") as f:
-            return json.loads(f.read())
+            result = json.loads(f.read())
+
+        # Log resultado
+        if result.get("passed"):
+            logger.info(f"Test PASSED: {qual}", "RUNNER")
+        else:
+            logger.warning(f"Test FAILED: {qual} - {result.get('error', 'Unknown error')[:200]}", "RUNNER")
+            # Si hay autopsia disponible, loggearla
+            if "autopsy" in result:
+                log_autopsy(result["autopsy"], test_id=qual)
+
+        return result
     finally:
         try:
             os.remove(out_path)
         except Exception:
             pass
+        logger.flush()  # Asegurar que logs se persistan
 
 
 def pytest_collect(paths):

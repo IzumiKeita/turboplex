@@ -1,10 +1,22 @@
 use indicatif::{ProgressBar, ProgressStyle};
 use serde_json::json;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
+use turboplex::utils::fs::atomic_write_json;
 use turboplex::TestResult;
+
+#[cfg(feature = "debug-logging")]
+macro_rules! debug_log {
+    ($($arg:tt)*) => {
+        eprintln!($($arg)*)
+    };
+}
+
+#[cfg(not(feature = "debug-logging"))]
+macro_rules! debug_log {
+    ($($arg:tt)*) => {};
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OutputMode {
@@ -88,7 +100,17 @@ impl OutputState {
 
     pub(crate) fn push(&mut self, event: TestEvent) {
         match event {
-            TestEvent::Finished { path, result } => {
+            TestEvent::Finished { path, mut result } => {
+                if result.cached && result.duration_ms > 0 {
+                    if result.duration_ms > 5 {
+                        debug_log!(
+                            "Cache integrity warning: cached duration_ms={}ms for {}",
+                            result.duration_ms,
+                            result.test_name
+                        );
+                    }
+                    result.duration_ms = 0;
+                }
                 if let Some(pb) = &self.pb {
                     pb.inc(1);
                     match self.opts.mode {
@@ -231,6 +253,18 @@ fn fixture_source(result: &TestResult) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+fn os_warm(result: &TestResult) -> bool {
+    if result.cached {
+        return false;
+    }
+    result
+        .enriched_data
+        .as_ref()
+        .and_then(|v| v.get("os_warm"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
 fn build_run_payload(
     cwd: &Path,
     results: &[(PathBuf, TestResult)],
@@ -241,35 +275,51 @@ fn build_run_payload(
     let mut failed = 0usize;
     let mut skipped = 0usize;
 
-    let results_json: Vec<serde_json::Value> = results
-        .iter()
-        .map(|(p, r)| {
-            let is_sk = is_skipped(r);
-            if is_sk {
-                skipped += 1;
-            } else if r.passed {
-                passed += 1;
-            } else {
-                failed += 1;
+    // Group failed tests by error category using BTreeMap for sorted keys
+    let mut failures_by_type: std::collections::BTreeMap<String, Vec<serde_json::Value>> =
+        std::collections::BTreeMap::new();
+    let mut results_payload: Vec<serde_json::Value> = Vec::with_capacity(results.len());
+
+    for (p, r) in results {
+        let is_sk = is_skipped(r);
+        let rel = p
+            .strip_prefix(cwd)
+            .unwrap_or(p)
+            .to_string_lossy()
+            .replace('\\', "/");
+        results_payload.push(json!({
+            "test": r.test_name,
+            "path": rel,
+            "duration_ms": r.duration_ms,
+            "cached": r.cached,
+            "os_warm": os_warm(r),
+            "passed": r.passed,
+            "skipped": is_sk,
+            "error": if r.passed { None } else { r.error.as_ref() },
+        }));
+        if is_sk {
+            skipped += 1;
+        } else if r.passed {
+            passed += 1;
+        } else {
+            failed += 1;
+            // Group by first line of error
+            if let Some(ref err) = r.error {
+                let category = err.lines().next().unwrap_or("Unknown error").to_string();
+                let error_entry = json!({
+                    "test": r.test_name,
+                    "path": rel,
+                    "duration_ms": r.duration_ms,
+                    "cached": r.cached,
+                    "os_warm": os_warm(r),
+                });
+                failures_by_type
+                    .entry(category)
+                    .or_default()
+                    .push(error_entry);
             }
-            let rel = p
-                .strip_prefix(cwd)
-                .unwrap_or(p)
-                .to_string_lossy()
-                .replace('\\', "/");
-            json!({
-                "path": rel,
-                "test": r.test_name,
-                "passed": r.passed,
-                "skipped": is_sk,
-                "skip_reason": skip_reason(r),
-                "cached": r.cached,
-                "fixture_source": fixture_source(r),
-                "duration_ms": r.duration_ms,
-                "error": r.error,
-            })
-        })
-        .collect();
+        }
+    }
 
     let report_rel = report_path.map(|p| {
         p.strip_prefix(cwd)
@@ -282,29 +332,33 @@ fn build_run_payload(
         "schemaVersion": "tpx.cli.run.v1",
         "ok": failed == 0,
         "summary": {
-            "total": results_json.len(),
+            "total": results.len(),
             "passed": passed,
             "failed": failed,
             "skipped": skipped,
             "duration_ms": duration_ms,
         },
+        "data": {
+            "cwd": cwd.to_string_lossy().replace('\\', "/"),
+            "results": results_payload,
+        },
         "artifacts": {
             "report": report_rel,
         },
-        "data": {
-            "results": results_json,
-        }
+        "failures_by_type": failures_by_type,
     })
 }
 
 fn write_jsonl_report(results: &[(PathBuf, TestResult)], report_path: &Path) -> Result<(), String> {
-    let mut file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(report_path)
-        .map_err(|e| format!("Cannot create report file: {}", e))?;
+    // Ensure parent directory exists
+    if let Some(parent) = report_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).map_err(|e| format!("Cannot create directory: {}", e))?;
+        }
+    }
 
+    // Build content first, then write atomically
+    let mut lines: Vec<String> = Vec::new();
     for (path, result) in results {
         let line = json!({
             "test_name": result.test_name,
@@ -312,20 +366,18 @@ fn write_jsonl_report(results: &[(PathBuf, TestResult)], report_path: &Path) -> 
             "passed": result.passed,
             "duration_ms": result.duration_ms,
             "cached": result.cached,
+            "os_warm": os_warm(result),
             "fixture_source": fixture_source(result),
             // Si falló, incluir el error_context completo del Python runner
             "error_context": if result.passed { None } else { result.enriched_data.as_ref().and_then(|d| d.get("error_context")) },
             "test_info": result.enriched_data.as_ref().and_then(|d| d.get("test_info")),
             "fixtures_used": result.enriched_data.as_ref().and_then(|d| d.get("fixtures_used")),
         });
-
-        writeln!(
-            file,
-            "{}",
-            serde_json::to_string(&line).map_err(|e| e.to_string())?
-        )
-        .map_err(|e| format!("Write error: {}", e))?;
+        lines.push(serde_json::to_string(&line).map_err(|e| e.to_string())?);
     }
+
+    let content = lines.join("\n");
+    atomic_write_json(report_path, &content).map_err(|e| format!("Write error: {}", e))?;
 
     Ok(())
 }
@@ -336,7 +388,6 @@ fn write_json_file(path: &Path, payload: &serde_json::Value) -> Result<(), Strin
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
     }
-    let text = serde_json::to_string(payload).map_err(|e| e.to_string())?;
-    fs::write(path, text).map_err(|e| e.to_string())?;
-    Ok(())
+    let text = serde_json::to_string_pretty(payload).map_err(|e| e.to_string())?;
+    atomic_write_json(path, &text).map_err(|e| e.to_string())
 }

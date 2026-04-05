@@ -66,6 +66,9 @@ coverage/
 #*.tplex_report.json
 .turboplex_cache/
 
+# TPlex logging and runtime data
+.tplex/
+
 # Benchmark results and logs (exclude from git)
 .benchmarks/results/*.json
 .benchmarks/logs/*.log
@@ -85,7 +88,7 @@ a.md
 /publish_preflight.ps1
 
 # Internal/private docs and notes
-.Documentacion/
+
 
 # Local preflight / packaging scratch
 .preflight_venv/

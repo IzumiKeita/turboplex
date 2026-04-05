@@ -6,6 +6,8 @@ use std::process::{Command, Stdio};
 use turboplex::{load_config, python_config_effective, PythonConfig};
 use walkdir::WalkDir;
 
+use super::ExecutionMode;
+
 pub(crate) const DEFAULT_MAX_DEPTH: usize = 5;
 
 pub(crate) fn print_help() {
@@ -16,10 +18,13 @@ turboplex (tpx) - High Performance Test Engine
 Usage:
     tpx                      # Auto-discover and run tests
     tpx mcp                  # Inicia el servidor MCP (stdio)
+    tpx --doctor             # Auditoría de salud del proyecto (safe mode)
     tpx --path ./tests     # Run tests in specific directory
     tpx --watch            # Watch for file changes and re-run
     tpx --compat           # Ejecuta los tests vía pytest (fixtures/conftest) en modo sesión (batch)
     tpx --compat-per-test  # Pytest por test (más lento, útil para debug)
+    tpx --unittest         # Ejecuta tests unittest (TestCase) vía adaptador
+    tpx --behave           # Ejecuta BDD (.feature) vía adaptador behave
     tpx --light            # Collect rápido sin cargar conftest.py (ideal para MCP/IDE)
     tpx --help            # Show this help
 
@@ -29,10 +34,14 @@ Options:
     --compat            Delegar ejecución a pytest (modo sesión / batch)
     --compat-session    Alias de --compat
     --compat-per-test   Pytest por test (legacy)
+    --unittest          Modo ejecución unittest (no compatible con --compat)
+    --behave            Modo ejecución behave (no compatible con --compat)
     --light             Modo light: collect sin conftest (rápido, sin DB setup)
+    --doctor            Ejecuta TurboPlex Doctor (diagnóstico sin modificar código)
+    --json              Con --doctor: emite reporte JSON; en ejecución normal: un único JSON por stdout (sin logs)
+    --fail-on-warn      Con --doctor: exit code 1 si hay warnings
     --quiet             Modo silencioso (solo fallos + resumen)
     --verbose           Modo detallado (línea por test)
-    --json              Emite un único JSON por stdout (sin logs)
     --out-json <path>   Escribe el JSON final a un archivo (backup del IDE)
     --help, -h          Show this help message
 
@@ -60,16 +69,24 @@ Aliases:
 }
 
 pub(crate) fn run_mcp_server() -> i32 {
-    let env = build_runtime_python_env(false, false, "mcp=1");
+    let env = build_runtime_python_env(ExecutionMode::Native, false, false, "mcp=1");
     let mut cmd = Command::new(&env.interpreter);
     cmd.current_dir(&env.cwd);
     cmd.arg("-m").arg("turboplex_py.mcp.server");
     cmd.env("PYTHONUNBUFFERED", "1");
     cmd.env("PYTHONIOENCODING", "utf-8");
     cmd.env("PYTHONUTF8", "1");
-    if let Some(pp) = &env.pythonpath {
-        cmd.env("PYTHONPATH", pp);
+
+    // Fase 3.1: Auto-inyección de CWD en PYTHONPATH
+    // Fase 3.2: Detección de root vía pyproject.toml ya está en build_runtime_python_env
+    let pythonpath = build_mcp_pythonpath(&env);
+    cmd.env("PYTHONPATH", &pythonpath);
+
+    // Fase 3.3: Herencia de VIRTUAL_ENV al motor nativo
+    if let Ok(venv) = std::env::var("VIRTUAL_ENV") {
+        cmd.env("VIRTUAL_ENV", venv);
     }
+
     let status = cmd
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
@@ -86,7 +103,19 @@ pub(crate) fn run_mcp_server() -> i32 {
 }
 
 pub(crate) fn get_test_cache_dir(base_dir: &Path) -> PathBuf {
-    base_dir.join(".turboplex_cache")
+    base_dir.join(".tplex").join("cache")
+}
+
+pub(crate) fn get_tplex_dir(base_dir: &Path) -> PathBuf {
+    base_dir.join(".tplex")
+}
+
+pub(crate) fn get_tplex_reports_dir(base_dir: &Path) -> PathBuf {
+    get_tplex_dir(base_dir).join("reports")
+}
+
+pub(crate) fn get_tplex_failures_dir(base_dir: &Path) -> PathBuf {
+    get_tplex_dir(base_dir).join("failures")
 }
 
 pub(crate) fn get_collected_tests_cache_path(base_dir: &Path) -> PathBuf {
@@ -101,6 +130,22 @@ pub(crate) fn compute_text_hash(text: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(text.as_bytes());
     hex::encode(hasher.finalize())
+}
+
+fn compute_db_env_fingerprint() -> String {
+    let mut pairs: Vec<(String, String)> = std::env::vars()
+        .filter(|(key, _)| key.starts_with("TPX_DB_"))
+        .collect();
+    if pairs.is_empty() {
+        return "none".to_string();
+    }
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    let raw = pairs
+        .into_iter()
+        .map(|(key, value)| format!("{}={}", key, value))
+        .collect::<Vec<_>>()
+        .join(";");
+    compute_text_hash(&raw)
 }
 
 pub(crate) fn compute_file_hash(path: &Path) -> Option<String> {
@@ -139,6 +184,7 @@ pub(crate) struct RuntimePythonEnv {
     pub(crate) fingerprint: String,
     pub(crate) compat: bool,
     pub(crate) compat_session: bool,
+    pub(crate) execution_mode: ExecutionMode,
 }
 
 fn is_root_marker_dir(dir: &Path) -> bool {
@@ -239,6 +285,7 @@ fn detect_deps_hash(root: &Path) -> Option<String> {
 }
 
 pub(crate) fn build_runtime_python_env(
+    execution_mode: ExecutionMode,
     compat: bool,
     compat_session: bool,
     extra_flags: &str,
@@ -308,9 +355,16 @@ pub(crate) fn build_runtime_python_env(
         .unwrap_or_else(|| "unknown".to_string());
     let deps = detect_deps_hash(&root).unwrap_or_else(|| "none".to_string());
     let pp = pythonpath.clone().unwrap_or_else(|| "none".to_string());
+    let db_env = compute_db_env_fingerprint();
+    let mode_str = match execution_mode {
+        ExecutionMode::Native => "native",
+        ExecutionMode::Pytest => "pytest",
+        ExecutionMode::Unittest => "unittest",
+        ExecutionMode::Behave => "behave",
+    };
     let fingerprint_raw = format!(
-        "py={};deps={};pp={};compat={};compat_session={};flags={}",
-        pyver, deps, pp, compat, compat_session, extra_flags
+        "py={};deps={};pp={};db_env={};mode={};compat={};compat_session={};flags={}",
+        pyver, deps, pp, db_env, mode_str, compat, compat_session, extra_flags
     );
     let fingerprint = compute_text_hash(&fingerprint_raw);
 
@@ -322,6 +376,7 @@ pub(crate) fn build_runtime_python_env(
         fingerprint,
         compat,
         compat_session,
+        execution_mode,
     }
 }
 
@@ -350,6 +405,57 @@ fn find_venv_python(start_dir: &Path) -> Option<String> {
     None
 }
 
+/// Fase 3.1: Construir PYTHONPATH para MCP asegurando CWD esté incluido
+/// Fase 3.2: Usar detección de root vía pyproject.toml
+fn build_mcp_pythonpath(env: &RuntimePythonEnv) -> String {
+    let sep = if cfg!(windows) { ";" } else { ":" };
+    let mut paths: Vec<String> = Vec::new();
+
+    // 1. Agregar CWD actual (auto-inyección Fase 3.1)
+    if let Ok(cwd) = std::env::current_dir() {
+        let cwd_str = cwd.to_string_lossy().to_string();
+        if !paths.contains(&cwd_str) {
+            paths.push(cwd_str);
+        }
+    }
+
+    // 2. Agregar root del proyecto detectado (Fase 3.2 via pyproject.toml)
+    let root = find_project_root(&env.cwd);
+    let root_str = root.to_string_lossy().to_string();
+    if !paths.contains(&root_str) {
+        paths.push(root_str);
+    }
+
+    // 3. Agregar src/ si existe en el root
+    let src = root.join("src");
+    if src.is_dir() {
+        let src_str = src.to_string_lossy().to_string();
+        if !paths.contains(&src_str) {
+            paths.push(src_str);
+        }
+    }
+
+    // 4. Agregar pythonpath existente del entorno si hay
+    if let Some(ref existing_pp) = env.pythonpath {
+        for part in existing_pp.split(sep) {
+            if !part.trim().is_empty() && !paths.contains(&part.to_string()) {
+                paths.push(part.to_string());
+            }
+        }
+    }
+
+    // 5. Agregar PYTHONPATH del entorno padre si existe
+    if let Ok(parent_pp) = std::env::var("PYTHONPATH") {
+        for part in parent_pp.split(sep) {
+            if !part.trim().is_empty() && !paths.contains(&part.to_string()) {
+                paths.push(part.to_string());
+            }
+        }
+    }
+
+    paths.join(sep)
+}
+
 pub(crate) fn discover_test_paths_from(base_dir: &Path, max_depth: usize) -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
@@ -367,7 +473,7 @@ pub(crate) fn discover_test_paths_from(base_dir: &Path, max_depth: usize) -> Vec
         "*.egg-info",
         ".coverage",
         ".hypothesis",
-        ".turboplex_cache",
+        ".tplex",
     ];
 
     for entry in WalkDir::new(base_dir)

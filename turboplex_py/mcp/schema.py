@@ -59,6 +59,12 @@ def payload_ok(
     data: dict[str, Any],
     artifacts: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    # Validación: tool y run_id deben ser strings no vacíos
+    if not isinstance(tool, str) or not tool.strip():
+        raise ValueError(f"tool debe ser string no vacío, recibido: {tool!r}")
+    if not isinstance(run_id, str) or not run_id.strip():
+        raise ValueError(f"run_id debe ser string no vacío, recibido: {run_id!r}")
+    
     return ToolPayload(
         tool=tool,
         ok=True,
@@ -78,11 +84,22 @@ def payload_error(
     duration_ms: int,
     error: ToolError,
 ) -> dict[str, Any]:
+    # Validación: tool y run_id deben ser strings no vacíos
+    if not isinstance(tool, str) or not tool.strip():
+        raise ValueError(f"tool debe ser string no vacío, recibido: {tool!r}")
+    if not isinstance(run_id, str) or not run_id.strip():
+        raise ValueError(f"run_id debe ser string no vacío, recibido: {run_id!r}")
+    
+    # Mensaje por defecto si no hay resultado inmediato o está vacío
+    error_dict = error.as_dict()
+    if not error_dict.get("message") or not str(error_dict["message"]).strip():
+        error_dict["message"] = "Ejecución en curso o tiempo de espera agotado. Revise los logs de TurboPlex en el terminal."
+    
     return ToolPayload(
         tool=tool,
         ok=False,
         run_id=run_id,
         mode=mode,
         summary={"duration_ms": duration_ms},
-        data={"error": error.as_dict()},
+        data={"error": error_dict},
     ).as_dict()

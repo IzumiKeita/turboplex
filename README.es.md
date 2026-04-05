@@ -134,12 +134,11 @@ tpx --analyze
    3. Prioridad 28: Revisar dependencias de fixtures y asegurar setup/teardown correcto
 ```
 
-**Archivos Generados:**
-- `turboplex_full_report.json` — Reporte JSONL completo con contexto de errores (traceback, locals, diff, parametrize call_spec)
-- Categorización automática: Errores de DB, fallos de Auth, issues de import, problemas de fixtures
-- Salida JSON lista para IA para pipelines de debugging automatizado
-- De-duplicación de errores con fingerprinting y conteo de ocurrencias
-- Normalización cross-platform de rutas (forward slashes para compatibilidad universal)
+**Archivos Generados (v0.3.4):**
+- `.tplex/reports/report_YYYYMMDD_HHMMSS.json` — Reportes JSON con historial (rotación 20 archivos)
+- `.tplex/failures/failures_YYYYMMDD_HHMMSS.md` — Reportes de fallos categorizados (rotación 20 archivos)
+- `tplex_last_run.log` — Punto de contacto único en raíz del proyecto
+- Escritura atómica en todos los archivos (temp + rename) para prevenir corrupción
 
 ### Speedrun: Suite de Producción (~200 tests)
 
@@ -188,9 +187,13 @@ test_paths = ["tests"]
 project_path = "."
 ```
 
-### Caché
+### Caché (v0.3.4)
 
-El caché se almacena en `.turboplex_cache/` y se invalida automáticamente cuando los archivos de test cambian (hash SHA-256).
+El caché se almacena en `.tplex/cache/` y se invalida automáticamente cuando:
+- Los archivos de test cambian (hash SHA-256)
+- El fingerprint del runtime cambia (versión Python, hash de deps, PYTHONPATH, flags)
+
+El fingerprint incluye variables `TPX_DB_*` para invalidación consciente de DB.
 
 <a id="es-api-agentes-ia"></a>
 ## API para Agentes IA
@@ -224,7 +227,7 @@ El caché se almacena en `.turboplex_cache/` y se invalida automáticamente cuan
 
 - Contrato estable por herramienta (`discover`, `run`, `get_report`): `schemaVersion`, `tool`, `ok`, `runId`, `mode`, `summary`, `logs`, `data`.
 - En errores (`ok=false`), `data.error` usa:
-  - `code`: `timeout | subprocess_failed | invalid_input | not_found | internal_error`
+  - `code`: `timeout | subprocess_failed | invalid_input | not_found | internal_error | SCHEMA_SYNC_BLOCKED | HEALTH_CHECK_FAILED`
   - `message`: texto legible
   - `details`: opcional (`phase`, `returncode`, `timeout_s`, etc.)
 - `run.summary` incluye métricas operativas: `workers_used`, `timeouts`, `subprocess_failures`.
@@ -234,6 +237,10 @@ El caché se almacena en `.turboplex_cache/` y se invalida automáticamente cuan
   - `data.results[].db_dirty_summary`
   - `run.summary.db_write_count_total`
   - `run.summary.db_dirty_tests`
+
+Guardrails DB (v0.3.6):
+- SSG bloquea ejecución si Alembic head != versión en DB (`SCHEMA_SYNC_BLOCKED`).
+- Pre-flight health checks devuelven un código estable (`HEALTH_CHECK_FAILED`) para evitar errores ambiguos.
 
 Cobertura de integración agregada hoy:
 - `tests/test_mcp_db_integration.py` valida `run` de MCP con escrituras reales en SQLite.
@@ -272,7 +279,13 @@ Variables de hardening DB:
 | `tpx` | Auto-descubrir y ejecutar tests |
 | `tpx --path ./tests` | Ejecutar tests en directorio |
 | `tpx --watch` | Modo watch con auto-reload |
+| `tpx --doctor` | Diagnóstico de salud del proyecto (v0.3.6) |
+| `tpx --doctor --json` | Emitir reporte del doctor en JSON (ideal CI/IDE) |
+| `tpx --doctor --fail-on-warn` | Exit code != 0 si hay warnings (CI estricto) |
+| Tool MCP `doctor` | Ejecuta `tpx --doctor --json` vía MCP y devuelve el reporte estructurado |
 | `tpx --compat` | Delegar discovery/ejecución a pytest para suites con muchos fixtures |
+| `tpx --unittest` | Ejecutar suites `unittest.TestCase` vía adaptador (no compatible con `--compat`) |
+| `tpx --behave` | Ejecutar BDD `.feature` vía adaptador behave (requiere `behave`, no compatible con `--compat`) |
 | `tpx --compat --light` | Modo discovery rápido (saltea carga de conftest.py) |
 | `tpx --analyze` | Analizar fallos de tests y categorizar errores (requiere `turboplex_full_report.json`) |
 | `tpx mcp` | Iniciar servidor MCP sobre stdio para integración IDE |
@@ -316,7 +329,7 @@ Este proyecto ignora archivos generados y configuración local para mantener el 
 - Entornos y metadatos locales de Python (por ejemplo `.venv/`, `__pycache__/`, `*.egg-info/`)
 - Archivos de entorno con secretos o configuración local (`.env`, `.env.*`)
 - Dependencias y salidas de tooling web si aplican (`node_modules/`, `dist/`, `build/`)
-- Cachés y reportes generados por TurboPlex (`.turboplex_cache/`, `.tplex_report.json`, `turboplex_full_report.json`)
+- Cachés y reportes generados por TurboPlex (`.tplex/`, `tplex_last_run.log`)
 
 <a id="es-license"></a>
 ## License
@@ -326,7 +339,7 @@ MIT License - Ver archivo `LICENSE`
 <a id="es-autores"></a>
 ## Autores
 
-**Versión TurboPlex:** 0.3.1 - **TurboPlex Team** - [@turbo plexus](https://github.com/turboplex)
+**Versión TurboPlex:** 0.3.4 - **TurboPlex Team** - [@turbo plexus](https://github.com/turboplex)
 
 ---
 

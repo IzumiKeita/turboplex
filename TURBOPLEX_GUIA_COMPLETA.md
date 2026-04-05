@@ -64,7 +64,7 @@ TurboPlex opera en tres fases distintas:
 
 1. **Collection Phase**: El collector Python escanea archivos de test usando AST parsing para encontrar funciones de test sin ejecutar importaciones pesadas.
 
-2. **Caching**: Los tests descubiertos se almacenan en `.turboplex_cache/collected_tests.json` con un hash del contenido de los archivos.
+2. **Caching**: Los tests descubiertos se almacenan en `.tplex/cache/collected_tests.json` con un hash del contenido de los archivos.
 
 3. **Ejecución Paralela**: Cada test se ejecuta en un proceso Python separado, permitiendo paralelización y aislamiento.
 
@@ -89,9 +89,12 @@ TurboPlex opera en tres fases distintas:
 |---------|-----------|
 | `turboplex_py/__main__.py` | Entry point para CLI |
 | `turboplex_py/collector.py` | Descubrimiento de tests via AST |
+| `turboplex_py/runner/` | Runner (subproceso por test) + output JSON enriquecido |
 | `turboplex_py/pytest_bridge.py` | Puente de fixtures Pytest ↔ TurboPlex |
 | `turboplex_py/fixtures.py` | Decorador `@fixture` compatible con pytest |
 | `turboplex_py/db_lazy_patcher.py` | Patcher para SQLAlchemy lazy loading |
+| `turboplex_py/runner/adapters/` | Capa Adaptador (Hidra): `unittest` + `behave` |
+| `turboplex_py/mcp/` | Servidor MCP + guardrails (SSG/health checks) + logging bufferizado |
 
 ### 2.3 Variables de Entorno Críticas
 
@@ -99,6 +102,12 @@ TurboPlex opera en tres fases distintas:
 # Modo TurboPlex (activa el conftest híbrido)
 export TURBOPLEX_MODE=1
 export TURBOTEST_SUBPROCESS=1
+
+# Forzar intérprete Python (venv) usado por TurboPlex
+export TPX_PYTHON_EXE="/path/a/tu/venv/bin/python"
+
+# MCP: collection rápido sin importar conftest pesado
+export TPX_MCP_LIGHT_COLLECT=1
 
 # Configuración de Base de Datos
 export TEST_DATABASE_URL="postgresql+psycopg2://user:pass@localhost/db"
@@ -157,9 +166,29 @@ project-root/
 │   │   │   └── config.py        # ← Pydantic Settings
 │   │   └── ...
 │   └── .env                     # Variables de entorno
-├── .turboplex_cache/            # Cache auto-generado
+├── .tplex/                      # Artefactos de TurboPlex (cache/reportes/logs)
 └── .venv/
 ```
+
+### 3.4 Modos de Ejecución (v0.3.6)
+
+```bash
+# Nativo (default)
+tpx --path backend/tests/
+
+# Compat Pytest (plugins/fixtures)
+tpx --compat --path backend/tests/
+
+# Unittest (TestCase) vía adaptador
+tpx --unittest --path backend/tests/
+
+# Behave (BDD .feature) vía adaptador (requiere behave instalado)
+tpx --behave --path backend/features/
+```
+
+Notas:
+- `--compat` es incompatible con `--unittest/--behave` (elige un modo de ejecución).
+- Todos los adaptadores ejecutan con aislamiento transaccional de DB (rollback en `finally`) y logging bufferizado (`TplexLogger`).
 
 ---
 
@@ -786,6 +815,32 @@ def test_simple():
 ```bash
 cd backend
 python -m turboplex_py collect tests/test_isolated.py --out-json /tmp/out.json
+```
+
+### 8.5 Uso de --doctor para Diagnóstico de Salud
+
+```bash
+# Ejecutar diagnóstico completo del proyecto
+tpx --doctor
+```
+
+Salida:
+```
+🏥 TURBOPLEX DOCTOR - v0.3.6
+══════════════════════════════════════════════════
+
+🔍 Capa 1: Infraestructura
+   [OK] Directorio .tplex/ saludable
+
+🔍 Capa 2: Rendimiento
+   [!] tests/conftest.py detectado como 'Pesado' (75KB)
+       → Receta: Mover imports pesados dentro de los fixtures
+
+🔍 Capa 3: Compatibilidad
+   [OK] No se encontraron issues de compatibilidad
+
+🔍 Capa 4: Integridad
+   [OK] Escritura atómica verificada. No hay reportes corruptos.
 ```
 
 ---

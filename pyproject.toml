@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "turboplex"
-version = "0.3.2"
+version = "0.3.5"
 description = "High Performance Test Engine - Rust + Python"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.10"
@@ -25,5 +25,42 @@ dependencies = [
 
 [tool.maturin]
 bindings = "bin"
-include = ["turboplex_py/**/*", "turboplex_py/mcp/**/*", "TURBOPLEX_GUIDE.md"]
+include = [
+    "turboplex_py/**/*",
+    "turboplex_py/db/**/*",
+    "turboplex_py/compat/**/*",
+    "turboplex_py/mcp/**/*",
+    "turboplex_py/runner/**/*",
+    "turboplex_py/utils/**/*",
+    "TURBOPLEX_GUIDE.md"
+]
+exclude = [
+    "target/**/*",
+    "target/**",
+    ".tplex/**/*",
+    ".benchmarks/**/*",
+    ".turboplex_cache/**/*",
+    ".venv*/**/*",
+    "lib/**/*",
+    "bin/**/*",
+    "tests/**/*",
+    "*.log",
+    "*.tmp",
+    "*.temp",
+    "*.swp",
+    "*.bak",
+    "result*.json",
+    "*_results.json",
+    "failures_*.md",
+    "analyze_*.py",
+    "dist/**/*",
+    "build/**/*",
+    "*.egg-info/**/*",
+    "__pycache__/**/*",
+    ".pytest_cache/**/*",
+    ".mypy_cache/**/*",
+    ".ruff_cache/**/*",
+    ".cache/**/*",
+    "*.py[cod]"
+]
 python-packages = ["turboplex_py"]

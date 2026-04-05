@@ -12,6 +12,22 @@ use super::config::{python_config_effective, PythonConfig, TurboConfig};
 use super::process::run_process_with_timeout;
 use super::result::TestResult;
 
+/// Macro para logging condicional de debug
+/// Solo activo cuando el feature "debug-logging" está habilitado
+#[cfg(feature = "debug-logging")]
+#[allow(unused_macros)]
+macro_rules! debug_log {
+    ($($arg:tt)*) => {
+        eprintln!($($arg)*)
+    };
+}
+
+#[cfg(not(feature = "debug-logging"))]
+#[allow(unused_macros)]
+macro_rules! debug_log {
+    ($($arg:tt)*) => {};
+}
+
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn temp_json_path(prefix: &str) -> PathBuf {
@@ -340,7 +356,10 @@ pub(crate) fn run_python_item_fixed(
                     cached: true,
                     duration_ms: cached.duration_ms,
                     error: cached.error,
-                    enriched_data: Some(serde_json::json!({"fixture_source": "cached"})),
+                    enriched_data: Some(serde_json::json!({
+                        "fixture_source": "cached",
+                        "os_warm": false,
+                    })),
                 },
                 None,
             );
@@ -368,16 +387,10 @@ pub(crate) fn run_python_item_fixed(
     cmd.env("PYTHONIOENCODING", "utf-8");
     cmd.env("PYTHONUNBUFFERED", "1");
 
-    // DEBUG: Log the command being executed
-    eprintln!("[DEBUG] Running test: {}", label);
-    eprintln!("[DEBUG] Command: {:?}", cmd);
-    eprintln!("[DEBUG] Working dir: {:?}", std::env::current_dir().ok());
-
     let start = Instant::now();
     let captured = match run_process_with_timeout(&mut cmd, Duration::from_millis(timeout_ms)) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("[DEBUG] Process execution failed: {}", e);
             let _ = progress.lock().map(|pb| pb.inc(1));
             return (
                 TestResult {
@@ -393,21 +406,6 @@ pub(crate) fn run_python_item_fixed(
         }
     };
     let duration_ms = start.elapsed().as_millis() as u64;
-
-    // DEBUG: Log process results
-    eprintln!("[DEBUG] Process exited with status: {:?}", captured.status);
-    eprintln!("[DEBUG] Timed out: {}", captured.timed_out);
-
-    let stdout_preview = String::from_utf8_lossy(&captured.stdout);
-    let stderr_preview = String::from_utf8_lossy(&captured.stderr);
-    eprintln!(
-        "[DEBUG] stdout preview (first 500 chars): {}",
-        &stdout_preview[..stdout_preview.len().min(500)]
-    );
-    eprintln!(
-        "[DEBUG] stderr preview (first 500 chars): {}",
-        &stderr_preview[..stderr_preview.len().min(500)]
-    );
 
     let file_text = fs::read_to_string(&out_json_path).ok();
     let _ = fs::remove_file(&out_json_path);
@@ -429,6 +427,14 @@ pub(crate) fn run_python_item_fixed(
             Some(j) => {
                 // Keep the raw JSON for report generation
                 json_raw = Some(serde_json::to_value(&j).unwrap_or(serde_json::Value::Null));
+                let rust_ms = duration_ms;
+                let python_ms = j.duration_ms;
+                let is_warm = rust_ms.saturating_sub(python_ms) < 150;
+                if let Some(ref mut raw) = json_raw {
+                    if let Some(obj) = raw.as_object_mut() {
+                        obj.insert("os_warm".to_string(), serde_json::Value::Bool(is_warm));
+                    }
+                }
 
                 // Extract error from either new error_context or legacy error field
                 let error_msg = if let Some(ref ctx) = j.error_context {

@@ -23,15 +23,57 @@ from turboplex_py.mcp import (
     attach_logs,
     turboplex_collect,
     turboplex_run_one,
+    turboplex_doctor,
     pytest_collect,
     pytest_run,
+    # SSG Auto-Check v0.3.6+
+    preflight_guard,
+    HealthCheckError,
+    SchemaSyncError,
+    log_health_check,
+    log_schema_sync,
+    get_tplex_logger,
 )
+
+def _run_preflight_guard(run_id: str, t0: float) -> None:
+    """Ejecuta preflight_guard con SSG auto-detect.
+
+    Auto-detecta alembic.ini y ejecuta Schema Sync Guard.
+    Si falla, lanza SchemaSyncError con mensaje profesional.
+
+    Raises:
+        SchemaSyncError: Si DB está desincronizada
+        HealthCheckError: Si otros checks fallan
+    """
+    try:
+        report = preflight_guard(
+            check_postgres=True,
+            check_env=True,
+            check_deps=True,
+            check_alembic=True,  # Auto-detect alembic.ini
+        )
+        # Log result
+        log_health_check(report)
+        for check_name, check_data in report.checks.items():
+            if check_name == "alembic_sync":
+                log_schema_sync(check_data.get("details", {}))
+    except SchemaSyncError as e:
+        # Log el error específico de SSG
+        log_schema_sync({
+            "synced": False,
+            "error": str(e),
+            "note": "Freno de Mano activado - ejecución abortada"
+        })
+        raise
+
 
 def _map_error(e: Exception) -> ToolError:
     if isinstance(e, (ToolTimeout, ToolSubprocessError)):
         raw = e.as_error()
         details = {k: v for k, v in raw.items() if k not in ("code", "message")}
         return ToolError(code=raw.get("code", "internal_error"), message=raw.get("message", str(e)), details=details or None)
+    if isinstance(e, HealthCheckError):
+        return ToolError(code="HEALTH_CHECK_FAILED", message=str(e), details={"phase": "pre-flight", "guard": "HEALTH"})
     db = classify_db_error(e)
     if db.get("code") != "db_internal":
         return ToolError(
@@ -67,6 +109,44 @@ def _build_server():
             return "dev"
 
     @mcp.tool()
+    def doctor(mode: str = "native", fail_on_warn: bool = False) -> str:
+        run_id = uuid_v7()
+        t0 = time.perf_counter()
+        buf_out = io.StringIO()
+        buf_err = io.StringIO()
+        with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
+            try:
+                report = turboplex_doctor(mode=mode, fail_on_warn=fail_on_warn)
+                summary_raw = report.get("summary") if isinstance(report, dict) else None
+                failed = int((summary_raw or {}).get("failed") or 0) if isinstance(summary_raw, dict) else 0
+                warned = int((summary_raw or {}).get("warned") or 0) if isinstance(summary_raw, dict) else 0
+                payload = payload_ok(
+                    tool="doctor",
+                    run_id=run_id,
+                    mode=mode,
+                    summary={
+                        "duration_ms": int((time.perf_counter() - t0) * 1000),
+                        "failed": failed,
+                        "warned": warned,
+                        "passed": failed == 0,
+                    },
+                    data={"report": report},
+                )
+            except Exception as e:
+                err = _map_error(e)
+                if isinstance(e, ValueError):
+                    err.code = "invalid_input"
+                payload = payload_error(
+                    tool="doctor",
+                    run_id=run_id,
+                    mode=mode,
+                    duration_ms=int((time.perf_counter() - t0) * 1000),
+                    error=err,
+                )
+        attach_logs(payload, buf_out.getvalue(), buf_err.getvalue())
+        return tool_json(payload)
+
+    @mcp.tool()
     def discover(paths: list[str] | None = None, compat: bool = False) -> str:
         run_id = uuid_v7()
         t0 = time.perf_counter()
@@ -74,7 +154,19 @@ def _build_server():
         buf_err = io.StringIO()
         with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
             try:
-                paths = paths or ["."]
+                # SSG Auto-Check: Freno de Mano antes de ejecutar
+                _run_preflight_guard(run_id, t0)
+
+                # P0.2: Validación explícita de input
+                if paths is None:
+                    paths = ["."]
+                elif not isinstance(paths, list):
+                    raise ValueError(f"paths debe ser una lista de strings, recibido: {type(paths).__name__}")
+                elif not paths:
+                    raise ValueError("paths no puede estar vacío")
+                elif not all(isinstance(p, str) for p in paths):
+                    raise ValueError("todos los elementos de paths deben ser strings")
+                
                 workers_used = 1
                 if compat:
                     raw_items = pytest_collect(paths)
@@ -104,6 +196,38 @@ def _build_server():
                     },
                     data={"items": items},
                 )
+            except SchemaSyncError as e:
+                # SSG Freno de Mano: Retornar payload_error profesional
+                payload = payload_error(
+                    tool="discover",
+                    run_id=run_id,
+                    mode="error",
+                    duration_ms=int((time.perf_counter() - t0) * 1000),
+                    error=ToolError(
+                        code="SCHEMA_SYNC_BLOCKED",
+                        message=str(e),
+                        details={
+                            "hint": 'Ejecuta "alembic upgrade head" para sincronizar la base de datos',
+                            "phase": "pre-flight",
+                            "guard": "SSG"
+                        }
+                    ),
+                )
+            except HealthCheckError as e:
+                payload = payload_error(
+                    tool="discover",
+                    run_id=run_id,
+                    mode="error",
+                    duration_ms=int((time.perf_counter() - t0) * 1000),
+                    error=ToolError(
+                        code="HEALTH_CHECK_FAILED",
+                        message=str(e),
+                        details={
+                            "phase": "pre-flight",
+                            "guard": "HEALTH",
+                        },
+                    ),
+                )
             except Exception as e:
                 payload = payload_error(
                     tool="discover",
@@ -123,12 +247,21 @@ def _build_server():
         buf_err = io.StringIO()
         with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
             try:
+                # SSG Auto-Check: Freno de Mano antes de ejecutar tests
+                _run_preflight_guard(run_id, t0)
+
+                # P0.2: Validación explícita de input
+                if selection is None:
+                    raise ValueError("selection es requerido y no puede ser None")
+                elif not isinstance(selection, list):
+                    raise ValueError(f"selection debe ser una lista, recibido: {type(selection).__name__}")
+                elif not selection:
+                    raise ValueError("selection no puede estar vacío")
+                
                 results = []
                 root = os.getcwd()
                 workers_used = 0
                 timeouts = 0
-                if selection is None:
-                    raise RuntimeError("selection es requerido")
 
                 if compat:
                     if not isinstance(selection, list):
@@ -213,6 +346,38 @@ def _build_server():
                     },
                     data={"results": results},
                 )
+            except SchemaSyncError as e:
+                # SSG Freno de Mano: Retornar payload_error profesional
+                payload = payload_error(
+                    tool="run",
+                    run_id=run_id,
+                    mode="error",
+                    duration_ms=int((time.perf_counter() - t0) * 1000),
+                    error=ToolError(
+                        code="SCHEMA_SYNC_BLOCKED",
+                        message=str(e),
+                        details={
+                            "hint": 'Ejecuta "alembic upgrade head" para sincronizar la base de datos',
+                            "phase": "pre-flight",
+                            "guard": "SSG"
+                        }
+                    ),
+                )
+            except HealthCheckError as e:
+                payload = payload_error(
+                    tool="run",
+                    run_id=run_id,
+                    mode="error",
+                    duration_ms=int((time.perf_counter() - t0) * 1000),
+                    error=ToolError(
+                        code="HEALTH_CHECK_FAILED",
+                        message=str(e),
+                        details={
+                            "phase": "pre-flight",
+                            "guard": "HEALTH",
+                        },
+                    ),
+                )
             except Exception as e:
                 err = _map_error(e)
                 if isinstance(e, ValueError):
@@ -276,6 +441,9 @@ def _build_server():
 
 def main() -> int:
     install_stdio_guard()
+    logger = get_tplex_logger()
+    logger.info("MCP server starting", "SYSTEM")
+    logger.flush()
     try:
         mcp = _build_server()
     except Exception as e:

@@ -64,7 +64,7 @@ TurboPlex operates in three distinct phases:
 
 1. **Collection Phase**: The Python collector scans test files using AST parsing to find test functions without running heavy imports.
 
-2. **Caching**: Discovered tests are stored in `.turboplex_cache/collected_tests.json` with a hash of file contents.
+2. **Caching**: Discovered tests are stored in `.tplex/cache/collected_tests.json` with a hash of file contents.
 
 3. **Parallel Execution**: Each test runs in a separate Python process, enabling parallelization and isolation.
 
@@ -90,16 +90,24 @@ TurboPlex operates in three distinct phases:
 |---------|-----------|
 | `turboplex_py/__main__.py` | CLI entry point |
 | `turboplex_py/collector.py` | Test discovery via AST |
-| `turboplex_py/runner.py` | Test runner with enriched JSON output |
+| `turboplex_py/runner/` | Test runner (subprocess-per-test) + enriched JSON output |
 | `turboplex_py/pytest_bridge.py` | Pytest ↔ TurboPlex fixture bridge |
 | `turboplex_py/fixtures.py` | `@fixture` decorator compatible with pytest |
 | `turboplex_py/db_lazy_patcher.py` | SQLAlchemy lazy loading patcher |
+| `turboplex_py/runner/adapters/` | Adapter layer (Hydra): `unittest` + `behave` |
+| `turboplex_py/mcp/` | MCP server + guardrails (SSG/health checks) + buffered logging |
 
 ### 2.3 Critical Environment Variables
 
 ```bash
 # TurboPlex mode (activates hybrid conftest)
 export TURBOPLEX_MODE=1
+
+# Force a specific Python interpreter (venv)
+export TPX_PYTHON_EXE=/path/to/venv/bin/python
+
+# MCP fast collect (skips heavy conftest imports during discovery)
+export TPX_MCP_LIGHT_COLLECT=1
 
 # Debug mode (shows internal execution)
 export RUST_LOG=debug
@@ -146,6 +154,26 @@ tpx --watch --path tests/
 # AI Analysis of test failures
 tpx --analyze
 ```
+
+### 3.4 Execution Modes (v0.3.6)
+
+```bash
+# Native mode (default)
+tpx --path tests/
+
+# Pytest compatibility mode (plugins/fixtures)
+tpx --compat --path tests/
+
+# Unittest adapter mode (unittest.TestCase)
+tpx --unittest --path tests/
+
+# Behave adapter mode (BDD .feature files; requires behave installed)
+tpx --behave --path features/
+```
+
+Notes:
+- `--compat` is mutually exclusive with `--unittest/--behave` (choose one execution mode).
+- Adapter executions run under transactional DB isolation (rollback in `finally`) and send traces to the buffered logger.
 
 ---
 
@@ -371,6 +399,32 @@ Output:
    2. Priority 32: Implement database cleanup between tests
 ```
 
+### 8.5 Using --doctor for Health Checks
+
+```bash
+# Run full project diagnosis
+tpx --doctor
+```
+
+Output:
+```
+🏥 TURBOPLEX DOCTOR - v0.3.4
+══════════════════════════════════════════════════
+
+🔍 Layer 1: Infrastructure
+   [OK] .tplex/ directory is healthy
+
+🔍 Layer 2: Performance
+   [!] tests/conftest.py detected as 'Heavy' (75KB)
+       → Prescription: Move heavy imports inside fixtures
+
+🔍 Layer 3: Compatibility
+   [OK] No compatibility issues found
+
+🔍 Layer 4: Integrity
+   [OK] Atomic write verified. No corrupt reports.
+```
+
 ---
 
 ## 9. Best Practices
@@ -490,6 +544,6 @@ tpx --path tests/test_failing.py 2>&1 | head -100
 
 ---
 
-**Documentation created:** March 2026  
-**TurboPlex Version:** 0.2.10  
+**Documentation created:** April 2026  
+**TurboPlex Version:** 0.3.6  
 **Author:** TurboPlex Team

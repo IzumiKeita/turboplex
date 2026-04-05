@@ -6,6 +6,20 @@ use wait_timeout::ChildExt;
 
 use super::config::CapturedOutput;
 
+/// Macro para logging condicional de debug
+/// Solo activo cuando el feature "debug-logging" esta habilitado
+#[cfg(feature = "debug-logging")]
+macro_rules! debug_log {
+    ($($arg:tt)*) => {
+        eprintln!($($arg)*)
+    };
+}
+
+#[cfg(not(feature = "debug-logging"))]
+macro_rules! debug_log {
+    ($($arg:tt)*) => {};
+}
+
 pub fn run_process_with_timeout(
     cmd: &mut Command,
     timeout: Duration,
@@ -52,7 +66,9 @@ pub fn run_process_with_timeout(
             })
         }
         None => {
-            let _ = child.kill();
+            if let Err(_e) = child.kill() {
+                debug_log!("Failed to kill timed-out child process: {}", _e);
+            }
             let _ = child.wait();
             let stdout = stdout_handle.join().unwrap_or_default();
             let stderr = stderr_handle.join().unwrap_or_default();

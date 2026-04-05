@@ -18,6 +18,11 @@ if os.environ.get("TURBOTEST_SUBPROCESS") == "1":
         ensure_patchers()
     except Exception:
         pass  # Ignore bootstrap errors, we'll handle them later
+    try:
+        from turboplex_py.mcp.transactional import install_transactional_interceptor
+        install_transactional_interceptor()
+    except Exception:
+        pass
 
 import sys
 import subprocess
@@ -225,13 +230,102 @@ def main():
             else:
                 print("Error: --nodeids-json required for pytest-run-batch", file=sys.stderr)
                 sys.exit(1)
+        elif len(sys.argv) > 1 and sys.argv[1] in ("unittest-collect", "behave-collect"):
+            import json
+            import pathlib
+
+            paths, out_json = _parse_collect_args(sys.argv[2:])
+            if sys.argv[1] == "unittest-collect":
+                from turboplex_py.runner.adapters import UnittestAdapter
+
+                items = UnittestAdapter().discover(paths)
+            else:
+                from turboplex_py.runner.adapters import BehaveAdapter
+
+                items = BehaveAdapter().discover(paths)
+            payload = {"items": items}
+            if out_json:
+                pathlib.Path(out_json).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            else:
+                print(json.dumps(payload, ensure_ascii=False))
+        elif len(sys.argv) > 1 and sys.argv[1] in ("unittest-run", "behave-run"):
+            import json
+            import pathlib
+
+            path, qual, out_json = _parse_run_args(sys.argv[2:])
+            if not path or not qual:
+                print("Error: --path and --qual required", file=sys.stderr)
+                sys.exit(1)
+            if sys.argv[1] == "unittest-run":
+                from turboplex_py.runner.adapters import UnittestAdapter
+
+                payload = UnittestAdapter().execute(path, qual)
+            else:
+                from turboplex_py.runner.adapters import BehaveAdapter
+
+                payload = BehaveAdapter().execute(path, qual)
+            if out_json:
+                pathlib.Path(out_json).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            else:
+                print(json.dumps(payload, ensure_ascii=False))
+            sys.exit(0 if payload.get("passed") else 1)
+        elif len(sys.argv) > 1 and sys.argv[1] in ("unittest-run-batch", "behave-run-batch"):
+            import json
+            import pathlib
+
+            batch_json, out_json = _parse_run_batch_args(sys.argv[2:])
+            if not batch_json:
+                print("Error: --batch-json required", file=sys.stderr)
+                sys.exit(1)
+            if os.path.isfile(batch_json):
+                batch_json = pathlib.Path(batch_json).read_text(encoding="utf-8", errors="replace")
+            items = json.loads(batch_json)
+            if not isinstance(items, list):
+                print("Error: batch_json must be a list", file=sys.stderr)
+                sys.exit(1)
+            if sys.argv[1] == "unittest-run-batch":
+                from turboplex_py.runner.adapters import UnittestAdapter
+
+                adapter = UnittestAdapter()
+            else:
+                from turboplex_py.runner.adapters import BehaveAdapter
+
+                adapter = BehaveAdapter()
+            results = []
+            for it in items:
+                if not isinstance(it, dict):
+                    results.append({"passed": False, "duration_ms": 0, "error": "invalid batch item"})
+                    continue
+                p = it.get("path")
+                q = it.get("qual") or it.get("qualname") or ""
+                if not isinstance(p, str) or not isinstance(q, str) or not p or not q:
+                    results.append({"passed": False, "duration_ms": 0, "error": "invalid batch item"})
+                    continue
+                results.append(adapter.execute(p, q))
+            payload = {"results": results, "total": len(results), "passed": sum(1 for r in results if r.get("passed"))}
+            if out_json:
+                pathlib.Path(out_json).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            else:
+                print(json.dumps(payload, ensure_ascii=False))
+            sys.exit(0 if payload.get("passed") == payload.get("total") else 1)
         else:
             print("Error: Unknown subcommand", file=sys.stderr)
             sys.exit(1)
         return
     
     # Normal mode - check if this is a direct call to collect, run, or run-batch (subcommand)
-    if len(sys.argv) > 1 and sys.argv[1] in ("collect", "run", "run-batch", "pytest-run-batch"):
+    if len(sys.argv) > 1 and sys.argv[1] in (
+        "collect",
+        "run",
+        "run-batch",
+        "pytest-run-batch",
+        "unittest-collect",
+        "unittest-run",
+        "unittest-run-batch",
+        "behave-collect",
+        "behave-run",
+        "behave-run-batch",
+    ):
         # Set TURBOTEST_SUBPROCESS to indicate we're in TurboPlex mode
         os.environ["TURBOTEST_SUBPROCESS"] = "1"
         
@@ -276,6 +370,84 @@ def main():
             else:
                 print("Error: --nodeids-json required for pytest-run-batch", file=sys.stderr)
                 sys.exit(1)
+        elif sys.argv[1] in ("unittest-collect", "behave-collect"):
+            import json
+            import pathlib
+
+            paths, out_json = _parse_collect_args(sys.argv[2:])
+            if sys.argv[1] == "unittest-collect":
+                from turboplex_py.runner.adapters import UnittestAdapter
+
+                items = UnittestAdapter().discover(paths)
+            else:
+                from turboplex_py.runner.adapters import BehaveAdapter
+
+                items = BehaveAdapter().discover(paths)
+            payload = {"items": items}
+            if out_json:
+                pathlib.Path(out_json).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            else:
+                print(json.dumps(payload, ensure_ascii=False))
+        elif sys.argv[1] in ("unittest-run", "behave-run"):
+            import json
+            import pathlib
+
+            path, qual, out_json = _parse_run_args(sys.argv[2:])
+            if not path or not qual:
+                print("Error: --path and --qual required", file=sys.stderr)
+                sys.exit(1)
+            if sys.argv[1] == "unittest-run":
+                from turboplex_py.runner.adapters import UnittestAdapter
+
+                payload = UnittestAdapter().execute(path, qual)
+            else:
+                from turboplex_py.runner.adapters import BehaveAdapter
+
+                payload = BehaveAdapter().execute(path, qual)
+            if out_json:
+                pathlib.Path(out_json).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            else:
+                print(json.dumps(payload, ensure_ascii=False))
+            sys.exit(0 if payload.get("passed") else 1)
+        elif sys.argv[1] in ("unittest-run-batch", "behave-run-batch"):
+            import json
+            import pathlib
+
+            batch_json, out_json = _parse_run_batch_args(sys.argv[2:])
+            if not batch_json:
+                print("Error: --batch-json required", file=sys.stderr)
+                sys.exit(1)
+            if os.path.isfile(batch_json):
+                batch_json = pathlib.Path(batch_json).read_text(encoding="utf-8", errors="replace")
+            items = json.loads(batch_json)
+            if not isinstance(items, list):
+                print("Error: batch_json must be a list", file=sys.stderr)
+                sys.exit(1)
+            if sys.argv[1] == "unittest-run-batch":
+                from turboplex_py.runner.adapters import UnittestAdapter
+
+                adapter = UnittestAdapter()
+            else:
+                from turboplex_py.runner.adapters import BehaveAdapter
+
+                adapter = BehaveAdapter()
+            results = []
+            for it in items:
+                if not isinstance(it, dict):
+                    results.append({"passed": False, "duration_ms": 0, "error": "invalid batch item"})
+                    continue
+                p = it.get("path")
+                q = it.get("qual") or it.get("qualname") or ""
+                if not isinstance(p, str) or not isinstance(q, str) or not p or not q:
+                    results.append({"passed": False, "duration_ms": 0, "error": "invalid batch item"})
+                    continue
+                results.append(adapter.execute(p, q))
+            payload = {"results": results, "total": len(results), "passed": sum(1 for r in results if r.get("passed"))}
+            if out_json:
+                pathlib.Path(out_json).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            else:
+                print(json.dumps(payload, ensure_ascii=False))
+            sys.exit(0 if payload.get("passed") == payload.get("total") else 1)
     else:
         # Find the Rust binary - look in package directory first, then PATH
         package_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

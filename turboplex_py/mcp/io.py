@@ -21,10 +21,28 @@ class StdoutJsonRpcGuard:
             return 0
         text = str(s)
         self._buf += text
+        
+        # Fase 2.2: Procesar líneas completas antes de truncar
         if len(self._buf) > self._max:
-            self._handle_non_jsonrpc(self._buf)
-            self._buf = ""
+            # Extraer todas las líneas completas antes de truncar
+            last_newline = self._buf.rfind('\n')
+            if last_newline > 0:
+                # Procesar líneas completas
+                complete_lines = self._buf[:last_newline]
+                self._buf = self._buf[last_newline + 1:]  # Mantener resto
+                for line in complete_lines.split('\n'):
+                    if line == "":
+                        continue
+                    if self._is_jsonrpc_line(line):
+                        self._u.write(line + '\n')
+                    else:
+                        self._handle_non_jsonrpc(line + '\n')
+            # Ahora truncar el resto si sigue excediendo
+            if len(self._buf) > self._max:
+                self._handle_non_jsonrpc(self._buf)
+                self._buf = ""
             return len(text)
+        
         while "\n" in self._buf:
             line, rest = self._buf.split("\n", 1)
             self._buf = rest
